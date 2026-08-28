@@ -333,7 +333,14 @@ class TorrentCreator:
 
                         # Run mkbrr subprocess in thread to avoid blocking
                         def run_mkbrr() -> int:
-                            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)  # noqa: S603
+                            process = subprocess.Popen(  # noqa: S603
+                                cmd,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                bufsize=1,
+                            )
 
                             if process.stdout is None:
                                 return process.wait()

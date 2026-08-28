@@ -58,6 +58,7 @@ async def test_run_ffmpeg_writes_report_next_to_output(tmp_path, monkeypatch):
     assert first_report != second_report
     assert "FFREPORT" not in takescreens.os.environ
     assert all(isinstance(argument, str) for argument in captured[0]["args"])
+    assert captured[0]["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
 
 
 @pytest.mark.asyncio

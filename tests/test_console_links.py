@@ -1,9 +1,12 @@
 # ruff: noqa: S101
 import asyncio
 from io import StringIO
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from rich.console import Console
 
+import src.console as console_module
 from src.console import ansi_to_html, buffer_console_logs, prompt_in_thread
 
 
@@ -21,6 +24,30 @@ def test_prompt_in_thread_returns_prompt_result() -> None:
         return await prompt_in_thread(lambda prefix, value: f"{prefix}{value}", "answer-", 42)
 
     assert asyncio.run(ask()) == "answer-42"
+
+
+def test_safe_input_restores_terminal_without_flushing(monkeypatch) -> None:
+    class InteractiveInput(StringIO):
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 42
+
+    terminal_settings = [1, 2, 3, 4, 5, 6, [b"a", b"b"]]
+    tcsetattr = Mock()
+    fake_termios = SimpleNamespace(TCSANOW=0, tcsetattr=tcsetattr)
+    stdin = InteractiveInput("yes\n")
+    stdout = StringIO()
+
+    monkeypatch.setattr(console_module, "termios", fake_termios)
+    monkeypatch.setattr(console_module, "_initial_terminal_settings", terminal_settings)
+    monkeypatch.setattr(console_module.sys, "stdin", stdin)
+    monkeypatch.setattr(console_module.sys, "stdout", stdout)
+
+    assert console_module._safe_input("> ") == "yes"
+    tcsetattr.assert_called_once_with(42, fake_termios.TCSANOW, terminal_settings)
+    assert stdout.getvalue() == "> "
 
 
 def test_buffer_console_logs_can_contend_across_consecutive_event_loops() -> None:

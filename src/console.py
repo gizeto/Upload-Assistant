@@ -17,18 +17,50 @@ from rich.logging import RichHandler
 from rich.progress import Progress
 from rich.text import Text
 
+if os.name == "posix":
+    import termios
+else:
+    termios = None
+
 _original_input = builtins.input
 
 
+def _capture_terminal_settings() -> list[Any] | None:
+    """Capture the interactive terminal state before background work starts."""
+    if termios is None or sys.stdin.closed or not sys.stdin.isatty():
+        return None
+    try:
+        return termios.tcgetattr(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+_initial_terminal_settings = _capture_terminal_settings()
+
+
+def _prepare_terminal_for_input() -> None:
+    """Restore the launch-time terminal state without discarding typed input."""
+    if termios is None or _initial_terminal_settings is None or sys.stdin.closed or not sys.stdin.isatty():
+        return
+    try:
+        settings = list(_initial_terminal_settings)
+        settings[6] = list(_initial_terminal_settings[6])
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, settings)
+    except (AttributeError, OSError, ValueError):
+        return
+
+
 def _safe_input(prompt: str = "") -> str:
-    """Thread-safe input that avoids readline terminal state corruption.
+    """Read input without readline and restore the terminal state first.
 
     When `readline` is imported, calling `input()` in a background thread makes it
     vulnerable to terminal state corruption (like losing echo) if a SIGWINCH occurs
     (e.g., when resizing the terminal or switching windows). Bypassing `readline`
     by using `sys.stdin.readline` natively fixes this at the cost of history and
-    advanced editing commands, which aren't needed for our CLI prompts.
+    advanced editing commands, which aren't needed for our CLI prompts. Restoring
+    the launch-time settings also recovers from terminal changes made during prep.
     """
+    _prepare_terminal_for_input()
     sys.stdout.write(prompt)
     sys.stdout.flush()
     line = sys.stdin.readline()

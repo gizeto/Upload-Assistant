@@ -147,7 +147,12 @@ async def run_command_with_logging(cmd: list[str], description: str) -> None:
 
     logger.debug(f"[cyan]Running command: {redacted_str}[/cyan]")
     try:
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
@@ -194,7 +199,12 @@ async def run_7z_with_progress(cmd: list[str], usenet_dir: str, safe_name: str, 
         # temporary-volume behavior vary by 7z build, so directory size alone
         # is only a fallback for the structured Web UI progress.
         progress_cmd = [cmd[0], cmd[1], "-bsp1", *cmd[2:]] if "-bsp1" not in cmd else cmd
-        process = await asyncio.create_subprocess_exec(*progress_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(
+            *progress_cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
 
         progress_total = max(total_size, 1)
         progress_id = "usenet-archive"
@@ -340,7 +350,13 @@ async def run_par2_with_progress(cmd: list[str], cwd: str | None = None) -> None
         progress_id = "usenet-par2"
         progress_label = "Generating Usenet PAR2"
         publish_progress(progress_id, progress_label, current=0, total=100, detail="Starting PAR2 generation", group="media")
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=cwd)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
 
         stdout_accum = []
 
@@ -440,7 +456,13 @@ async def run_nyuu_with_progress(cmd: list[str], cwd: str | None = None) -> None
 
     try:
         publish_progress("nyuu-upload", "Posting to Usenet", current=0, total=100, detail="Starting nyuu upload")
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=cwd)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
 
         stdout_accum = []
         total_articles = 0
@@ -537,6 +559,7 @@ async def run_pesto_with_progress(cmd: list[str], cwd: str | None = None) -> Non
         publish_progress("pesto-upload", "Posting to Usenet", current=0, total=100, detail="Starting pesto upload")
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
