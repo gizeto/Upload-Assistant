@@ -773,6 +773,7 @@ class DupeChecker:
                                             "link": entry_link,
                                             "tracker": tracker_name,
                                             "internal": entry.get("internal", 0),
+                                            "is_episode": not season_episode_match,
                                         }
                                     )
                                     logger.debug(f"[debug] Added episode ID {entry_id} to matched list")

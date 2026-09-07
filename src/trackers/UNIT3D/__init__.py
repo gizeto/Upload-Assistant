@@ -168,6 +168,8 @@ class UNIT3D:
                                 "bd_info": attributes.get("bd_info", ""),
                                 "description": attributes.get("description", ""),
                             }
+                        if self.tracker == "LST":
+                            result["trump_reason"] = attributes.get("trump_reason")
                         dupes.append(result)
                 else:
                     logger.info(f"{self.tracker}: [bold red]Failed to search torrents. HTTP Status: {response.status_code}")

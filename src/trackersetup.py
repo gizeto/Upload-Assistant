@@ -1156,14 +1156,23 @@ class TrackerSetup:
             logger.debug(f"[bold green]Will make a trumpable report for this upload at {tracker}[/bold green]")
 
         if not meta.tv_pack:
-            logger.info(f"[yellow]{tracker} requires comparisons to be provided for trump reports.\nAre the comparison images in the description or are you adding links?")
+            if tracker == "AITHER":
+                comparison_prompt = "Enter 'd' for comparisons in the description, 'L' to paste links, 'n' to report without comparisons, or press Enter to skip trumping:"
+            else:
+                logger.info(f"[yellow]{tracker} requires comparisons to be provided for trump reports.\nAre the comparison images in the description or are you adding links?")
+                comparison_prompt = "Enter 'd' if in description, 'L' if you want to paste links, or press Enter to skip trumping:"
             try:
-                where_compare = cli_ui.ask_string("Enter 'd' if in description, 'L' if you want to paste links, or press Enter to skip trumping:", default="")
+                where_compare = cli_ui.ask_string(comparison_prompt, default="")
             except EOFError, KeyboardInterrupt:
                 logger.info("[yellow]Prompt cancelled; skipping trump report creation.[/yellow]")
                 return False
 
             where_compare = (where_compare or "").strip()
+            if tracker == "AITHER" and where_compare.lower() == "n":
+                meta.screenshots_in_description = False
+                meta.screenshots_reported_torrent = None
+                meta.screenshots_trumping_torrent = None
+                return True
             if where_compare.lower() == "d":
                 meta.screenshots_in_description = True
                 return True
@@ -1299,6 +1308,10 @@ class TrackerSetup:
         """Create a trump report by POSTing to the /create endpoint"""
         logger.debug(f"[bold green]Creating trump report on {tracker}[/bold green]")
 
+        if tracker not in ("AITHER", "LST"):
+            logger.info(f"[red]Tracker {tracker} does not support trumping reports.[/red]")
+            return False
+
         tracker_instance = self._create_tracker_instance(tracker)
         if not tracker_instance:
             logger.info(f"[red]Tracker {tracker} is not registered in tracker_class_map[/red]")
@@ -1346,7 +1359,9 @@ class TrackerSetup:
             # Set fallback for debug mode so payload construction doesn't fail
             trumping_torrent_id: str | None = None
 
-        if meta.tv_pack:
+        matched_episodes = cast(list[JsonDict], meta.get(f"{tracker}_matched_episode_ids", []) or [])
+        reporting_episode = any(str(episode.get("id")) == reported_torrent_id and episode.get("is_episode", False) for episode in matched_episodes)
+        if meta.tv_pack and reporting_episode:
             message = f"{meta.ua_name} season pack trump"
         elif meta.trump_reason == "exact_match":
             message = f"{meta.ua_name} exact filename trump"
@@ -1355,7 +1370,25 @@ class TrackerSetup:
         else:
             message = f"{meta.ua_name} is trumping this torrent for reasons {meta.ua_name} has not correctly caught. User selected yes at a prompt."
 
-        if tracker != "LST":
+        if tracker == "LST":
+            # Original search results retain the API reason before dupe filtering.
+            for candidate in meta.initial_dupes.get(tracker, []):
+                if not isinstance(candidate, dict) or not candidate.get("trumpable") or str(candidate.get("id")) != reported_torrent_id:
+                    continue
+                detected_reason = candidate.get("trump_reason")
+                if isinstance(detected_reason, str) and detected_reason.strip():
+                    message = detected_reason.strip()
+                    break
+
+        try:
+            user_message = cli_ui.ask_string(f"Reason for the trump report on {tracker} (press Enter to keep it, or type a replacement):", default=message)
+        except EOFError, KeyboardInterrupt:
+            logger.info("[yellow]Prompt cancelled; using the automatic trump reason.[/yellow]")
+            user_message = None
+        if user_message and user_message.strip():
+            message = user_message.strip()
+
+        if tracker == "AITHER":
             payload: JsonDict = {"reported_torrent_id": reported_torrent_id, "trumping_torrent_id": trumping_torrent_id, "message": message}
             if "screenshots_reported_torrent" in meta:
                 payload["screenshots_reported_torrent"] = ",".join(cast(list[str], meta.screenshots_reported_torrent))
@@ -1364,14 +1397,7 @@ class TrackerSetup:
             if "screenshots_in_description" in meta and meta.screenshots_in_description:
                 payload["message"] = f"{payload.get('message', '')} - User says comparison screenshots are in description."
 
-        else:
-            if not meta.tv_pack:
-                try:
-                    user_message = cli_ui.ask_string("Enter a reason for the trump report on LST:")
-                except EOFError, KeyboardInterrupt:
-                    logger.info("[yellow]Prompt cancelled; no additional message provided.[/yellow]")
-                    user_message = None
-                message = message + ": " + user_message if user_message else message + ": No additional message provided by user"
+        elif tracker == "LST":
             message = message + ": https://lst.gg/torrents/" + str(trumping_torrent_id)
             payload: JsonDict = {"message": message}
 
