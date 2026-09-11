@@ -226,7 +226,7 @@ Implementation notes:
 
 ### UX / safety toggles
 
-- `sfx_on_prompt` (bool): Play a bell sound effect when asking for confirmation.
+- `sfx_on_prompt` (bool, default `True`): Play a bell before release confirmation. CLI runs use the terminal bell; WebUI runs play the sound in the browser after clicking Execute. Allow site audio and keep the tab unmuted. Fully unattended runs skip the sound along with confirmation.
 - `embed_links` (bool): Set true to embed terminal links using terminal hyperlinks (OSC 8). Set false to display the full raw URLs. `embed_dupe_links` remains supported temporarily as a deprecated alias.
 - `tracker_pass_checks` (str): Minimum number of trackers that must pass checks to continue upload.
 - `use_largest_playlist` (bool): Always use the largest Blu-ray playlist without prompting.
@@ -251,6 +251,13 @@ Implementation notes:
 - `radarr_url` (str): Radarr base URL.
 - `radarr_api_key` (str): Radarr API key.
 - `radarr_url_1` … `radarr_url_3` / `radarr_api_key_1` … `radarr_api_key_3` (str): Up to three optional additional Radarr instances.
+
+### Prowlarr Credential Fallback
+
+- `prowlarr_url` (str): Optional Prowlarr base URL. Set this together with `prowlarr_api_key` to retrieve supported tracker credentials at the start of each run.
+- `prowlarr_api_key` (str): Optional Prowlarr API key. Credentials retrieved from Prowlarr remain in memory and only fill missing local values.
+
+The integration supports API-key and raw-cookie fields exposed by enabled Cardigann indexers. Prowlarr masks some native-indexer secrets as `********`; UA ignores those values. Local API keys and cookie files take precedence.
 
 UA queries configured instances in order, starting with the unsuffixed primary instance and then continuing through suffixes `_1`, `_2`, and `_3`. Optional instances are omitted by default and can be added from the WebUI when needed.
 

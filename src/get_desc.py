@@ -32,6 +32,20 @@ from src.tracker_images import get_tracker_image_collection, has_tracker_image_c
 from src.trackers.common import Common
 from src.uploadscreens import UploadScreensManager
 
+NEXUSPHP_TRACKERS = {
+    "1PTBA",
+    "LAJIDUI",
+    "LEMONHD",
+    "LONGPT",
+    "PTCAFE",
+    "PTFANS",
+    "PTGTK",
+    "PTZONE",
+    "RAILGUNPT",
+    "XINGYUNGEPT",
+    "NEXUSPHP",
+}
+
 
 def html_to_bbcode(text: str) -> str:
     """Convert HTML tags to BBCode format."""
@@ -1405,6 +1419,8 @@ class DescriptionBuilder:
         if bluray:
             release_url, cover_images = await self.get_bluray_section(meta)
             if release_url:
+                if self.tracker not in ("TORRENTLEECH", "IMMORTALSEED"):
+                    release_url = f"[url]{release_url}[/url]"
                 desc_parts.append(f"[center]{release_url}[/center]")
             if cover_images:
                 desc_parts.append(f"[center]{cover_images}[/center]\n")
@@ -2145,11 +2161,6 @@ class DescriptionBuilder:
 
             # If screens_per_row is set, use that to determine how many screenshots should be on each row. Otherwise, use 2 as default
             screens_per_row = self._get_int_config("screens_per_row", 2)
-            if self.tracker == "HAWKEUNO":
-                width = self._get_int_config("thumbnail_size", 350)
-                # Adjust screens_per_row to keep total width below 1100
-                while screens_per_row * width > 1100 and screens_per_row > 1:
-                    screens_per_row -= 1
         except Exception:
             screens_per_row = 2
         return screens_per_row
@@ -2195,20 +2206,7 @@ class DescriptionBuilder:
         if not thumb_size:
             thumb_size = self._get_int_config("thumbnail_size", 350)
 
-        nexusphp_trackers = {
-            "1PTBA",
-            "LAJIDUI",
-            "LEMONHD",
-            "LONGPT",
-            "PTCAFE",
-            "PTFANS",
-            "PTGTK",
-            "PTZONE",
-            "RAILGUNPT",
-            "XINGYUNGEPT",
-            "NEXUSPHP",
-        }
-        if self.tracker in nexusphp_trackers:
+        if self.tracker in NEXUSPHP_TRACKERS:
             return f"[img]{raw_url}[/img]"
         if self.tracker == "HDTORRENTS":
             return f"<a href='{raw_url}'><img src='{img_url}' height=137></a> "
@@ -2226,6 +2224,12 @@ class DescriptionBuilder:
 
     def tracker_specific_formats(self, tracker: str, description: str) -> str:
         bbcode = BBCODE()
+        if tracker in NEXUSPHP_TRACKERS:
+            description = bbcode.remove_img_resize(description)
+
+        if tracker in {"ANTHELION", "BJSHARE", "BRASILTRACKER", "GREATPOSTERWALL"}:
+            description = bbcode.clamp_size_tags(description)
+
         if tracker == "BRASILTRACKER":
             description = bbcode.remove_img_resize(description)
             description = bbcode.remove_list(description)

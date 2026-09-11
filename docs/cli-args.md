@@ -90,7 +90,7 @@ If you pass a `.txt` file as the main positional input path (without specifying 
 
 ### Category / type / source / resolution
 
-- `-c`, `--category {movie,tv,fanres}`: Override the category.
+- `-c`, `--category {movie,tv,fanres,book,game,music,xxx}`: Override the category.
 - `-t`, `--type {disc,remux,encode,webdl,web-dl,webrip,hdtv,dvdrip}`: Override release type.
   - Stored as uppercase with `-` removed (e.g. `web-dl` → `WEBDL`).
 - `--source {Blu-ray,BluRay,DVD,DVD5,DVD9,HDDVD,WEB,HDTV,UHDTV,LaserDisc,DCP}`: Override the source string.
@@ -118,6 +118,9 @@ Note: if a manual TMDb or IMDb id is present in the incoming `meta` before parsi
 
 ### Tags / edition / language
 
+- `--name RELEASE_NAME`: Override the generated release name, including XXX release titles.
+- `--cast NAME[,NAME...]`: Override cast or XXX performers with a comma-separated list. This takes priority over detected metadata.
+- `-pub`, `--publisher NAME`: Override the book/audiobook publisher or XXX studio.
 - `-g`, `--tag [GROUP ...]`: Group tag.
   - Stored with a leading dash, e.g. `-g NTb` → `-NTb`.
 - `-serv`, `--service [SERVICE ...]`: Streaming service.
@@ -215,6 +218,13 @@ Thise will use the specified hash to get tracker ids from qBitTorrent or rTorren
 - `-rh`, `--rehash`: Rehash `.torrent` even if it was not needed.
 - `-mkbrr`, `--mkbrr`: Use mkbrr for torrent hashing.
 - `-entropy`, `--entropy N`: Use entropy in created torrents (32 or 64 bits).
+
+Reusable base torrents are recorded in `tmp/<release-id>/torrent_manifest.json`
+and stored by piece size under `tmp/<release-id>/torrents/<piece-size-bytes>/`.
+Tracker-ready `[TRACKER].torrent` files remain in the release directory. When
+`--nohash` is used, a tracker is skipped if no stored base satisfies its torrent
+policy.
+
 - `-rt`, `--randomized N`: Create N extra torrents with random infohash (default `0`).
 - `--infohash HASH`: V1 info hash to use as the base.
 - `-frc`, `--force-recheck`: (qBittorrent only with auto torrent searching) Force recheck torrent before uploading. NOTE: will find the best seeded torrent file from a supported site, for the related content, and force a recheck before uploading.

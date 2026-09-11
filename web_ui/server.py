@@ -34,6 +34,7 @@ import psutil
 
 import web_ui.auth as auth_mod
 from src.webui_progress import PROGRESS_STDOUT_PREFIX
+from src.prompt_sound import PROMPT_SOUND_STDOUT_MARKER
 from src.app_paths import CODE_DIR, DATA_DIR, STATE_DIR
 from src.external_tools import EXTERNAL_TOOL_KEYS, check_external_tools
 from src.meta import Meta
@@ -1515,6 +1516,220 @@ def _string_list_preview_values(value: object) -> list[str]:
     return results
 
 
+def _format_preview_size(value: object) -> str:
+    """Return a compact binary size for a positive byte count."""
+    try:
+        size = int(value)
+    except TypeError, ValueError:
+        return ""
+    if size <= 0:
+        return ""
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    amount = float(size)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            precision = 0 if unit == "B" else 1
+            return f"{amount:.{precision}f} {unit}"
+        amount /= 1024
+    return ""
+
+
+def _preview_mapping_values(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    return ", ".join(
+        f"{_stringify_preview_value(key)}: {_stringify_preview_value(item)}" for key, item in value.items() if _stringify_preview_value(key) and _stringify_preview_value(item)
+    )
+
+
+def _preview_detail_item(key: str, label: str, value: object) -> dict[str, str] | None:
+    if isinstance(value, Mapping):
+        text = _preview_mapping_values(value)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        text = ", ".join(_string_list_preview_values(value))
+    else:
+        text = _stringify_preview_value(value)
+    if not text:
+        return None
+    return {"key": key, "label": label, "value": text}
+
+
+def _preview_detail_section(key: str, label: str, rows: Sequence[tuple[str, str, object]]) -> dict[str, object] | None:
+    items = [item for item_key, item_label, value in rows if (item := _preview_detail_item(item_key, item_label, value))]
+    if not items:
+        return None
+    return {"key": key, "label": label, "items": items}
+
+
+def _extract_preview_detail_sections(meta_data: Mapping[str, object], music: Mapping[str, object]) -> list[dict[str, object]]:
+    """Build ordered, display-safe detail groups for the execution preview."""
+    category = _stringify_preview_value(meta_data.get("category")).upper()
+    filelist = meta_data.get("filelist")
+    file_count = len(filelist) if isinstance(filelist, Sequence) and not isinstance(filelist, (str, bytes, bytearray)) else 0
+    video_codec = _stringify_preview_value(meta_data.get("video_codec")) or _stringify_preview_value(meta_data.get("video_encode"))
+
+    sections: list[dict[str, object]] = []
+    media_section = _preview_detail_section(
+        "media",
+        "Media",
+        (
+            ("type", "Type", meta_data.get("type")),
+            ("source", "Source", meta_data.get("source")),
+            ("resolution", "Resolution", meta_data.get("resolution")),
+            ("container", "Container", meta_data.get("container")),
+            ("video_codec", "Video", video_codec),
+            ("audio", "Audio", meta_data.get("audio")),
+            ("audio_languages", "Audio Languages", meta_data.get("audio_languages")),
+            ("subtitle_languages", "Subtitles", meta_data.get("subtitle_languages")),
+            ("size", "Size", _format_preview_size(meta_data.get("source_size"))),
+            ("files", "Files", file_count or ""),
+        ),
+    )
+    if media_section:
+        sections.append(media_section)
+
+    if category == "MOVIE":
+        category_section = _preview_detail_section(
+            "movie",
+            "Movie Details",
+            (
+                ("release_date", "Release Date", meta_data.get("release_date")),
+                ("edition", "Edition", meta_data.get("edition")),
+                ("directors", "Director", meta_data.get("directors")),
+                ("studios", "Studio", meta_data.get("studios")),
+                ("cast", "Cast", meta_data.get("cast")),
+                ("original_language", "Original Language", meta_data.get("original_language")),
+                ("country", "Country", meta_data.get("origin_country") or meta_data.get("origin_country_code")),
+            ),
+        )
+    elif category == "TV":
+        episode = _stringify_preview_value(meta_data.get("episode_title")) or _stringify_preview_value(meta_data.get("episode_name"))
+        episode_code = "".join(
+            value for value in (_stringify_preview_value(meta_data.get("season")), _stringify_preview_value(meta_data.get("episode"))) if value not in {"", "0"}
+        )
+        episode_display = " — ".join(value for value in (episode_code, episode) if value)
+        tv_pack_raw = _stringify_preview_value(meta_data.get("tv_pack")).lower()
+        package = "Season Pack" if tv_pack_raw not in ("", "0", "false", "none", "null") else "Single Episode"
+        category_section = _preview_detail_section(
+            "tv",
+            "TV Details",
+            (
+                ("episode", "Episode", episode_display),
+                ("package", "Package", package),
+                ("season_name", "Season", meta_data.get("season_name") or meta_data.get("tvdb_season_name")),
+                ("air_date", "Air Date", meta_data.get("episode_airdate")),
+                ("service", "Service", meta_data.get("service_longname")),
+                ("networks", "Network", meta_data.get("networks")),
+            ),
+        )
+    elif category == "BOOK":
+        series = _stringify_preview_value(meta_data.get("book_series"))
+        series_index = _stringify_preview_value(meta_data.get("book_series_index"))
+        series_display = f"{series} #{series_index}" if series and series_index else series
+        bitrate = _stringify_preview_value(meta_data.get("audiobook_bitrate"))
+        if bitrate.isdigit():
+            bitrate = f"{bitrate} kbps"
+        category_section = _preview_detail_section(
+            "book",
+            "Book Details",
+            (
+                ("author", "Author", meta_data.get("author") or meta_data.get("book_author")),
+                ("narrator", "Narrator", meta_data.get("narrator")),
+                ("translator", "Translator", meta_data.get("book_translator")),
+                ("series", "Series", series_display),
+                ("publisher", "Publisher", meta_data.get("publisher") or meta_data.get("book_publisher")),
+                ("language", "Language", meta_data.get("book_language")),
+                ("isbn", "ISBN", meta_data.get("isbn") or meta_data.get("book_isbn")),
+                ("asin", "ASIN", meta_data.get("asin") or meta_data.get("book_asin")),
+                ("format", "Format", "Audiobook" if bool(meta_data.get("audiobook")) else "Book"),
+                ("duration", "Duration", meta_data.get("audiobook_duration_formatted")),
+                ("bitrate", "Bitrate", bitrate),
+            ),
+        )
+    elif category == "MUSIC":
+
+        def music_value(name: str, source_name: str = "") -> str:
+            value = _stringify_preview_value(music.get(name))
+            source = _stringify_preview_value(music.get(source_name)) if source_name else ""
+            return f"{value} ({source})" if value and source else value
+
+        track_count = _stringify_preview_value(music.get("track_count"))
+        disc_count = _stringify_preview_value(music.get("disc_count"))
+        tracks_discs = f"{track_count or '?'} / {disc_count or '1'}" if track_count or disc_count else ""
+        release = " • ".join(
+            value
+            for value in (
+                _stringify_preview_value(music.get("release_year")),
+                _stringify_preview_value(music.get("retail_date")),
+                _stringify_preview_value(music.get("release_label")),
+                _stringify_preview_value(music.get("release_catalogue_number")),
+            )
+            if value
+        )
+        edition = " • ".join(value for value in (_stringify_preview_value(music.get("edition")), _stringify_preview_value(music.get("edition_year"))) if value)
+        category_section = _preview_detail_section(
+            "music",
+            "Music Details",
+            (
+                ("artist", "Artist", music_value("artist", "artist_source")),
+                ("album", "Album", music_value("album", "album_source")),
+                ("original_year", "Original Year", music_value("original_year", "year_source")),
+                ("release_type", "Release Type", music_value("release_type", "release_type_source")),
+                ("media", "Media", music_value("media", "media_source")),
+                ("technical", "Technical", music.get("technical")),
+                ("tracks_discs", "Tracks / Discs", tracks_discs),
+                ("release", "This Release", release),
+                ("edition", "Edition", edition),
+                ("auxiliary", "Auxiliary Files", music.get("auxiliary")),
+                ("conflicts", "Metadata Conflicts", music.get("conflicts")),
+            ),
+        )
+    elif category == "GAME":
+        edition = " • ".join(
+            value
+            for value in (
+                _stringify_preview_value(meta_data.get("game_release_edition")),
+                _stringify_preview_value(meta_data.get("game_release_edition_year")),
+            )
+            if value
+        )
+        category_section = _preview_detail_section(
+            "game",
+            "Game Details",
+            (
+                ("platform", "Platform", meta_data.get("platform")),
+                ("release_type", "Release Type", meta_data.get("game_subcategory") or meta_data.get("game_release_type")),
+                ("version", "Version", meta_data.get("game_version")),
+                ("edition", "Edition", edition),
+                ("developer", "Developer", meta_data.get("developer")),
+                ("publisher", "Publisher", meta_data.get("publisher")),
+                ("region", "Region", meta_data.get("game_region")),
+                ("system", "System", meta_data.get("game_system")),
+                ("release_date", "Release Date", meta_data.get("igdb_first_release_date")),
+                ("engines", "Engine", meta_data.get("game_engines")),
+                ("modes", "Modes", meta_data.get("game_modes")),
+                ("age_ratings", "Age Rating", meta_data.get("game_age_ratings")),
+            ),
+        )
+    elif category == "XXX":
+        category_section = _preview_detail_section(
+            "xxx",
+            "Release Details",
+            (
+                ("publisher", "Studio / Publisher", meta_data.get("publisher")),
+                ("studios", "Studio", meta_data.get("studios")),
+                ("release_date", "Release Date", meta_data.get("release_date")),
+                ("performers", "Performers", meta_data.get("cast")),
+            ),
+        )
+    else:
+        category_section = None
+
+    if category_section:
+        sections.append(category_section)
+    return sections
+
+
 def _book_cover_from_meta(meta_data: Mapping[str, object], preview_session_id: str) -> str:
     covers_value = meta_data.get("covers")
     if isinstance(covers_value, Sequence) and not isinstance(covers_value, (str, bytes, bytearray)):
@@ -1632,6 +1847,7 @@ def _webui_subprocess_env() -> dict[str, str]:
     env.pop("NO_COLOR", None)
     env["UA_WEBUI_FORCE_COLOR"] = "1"
     env["UA_WEBUI_PROGRESS_STDOUT"] = "1"
+    env["UA_WEBUI_PROMPT_SOUND_STDOUT"] = "1"
     return env
 
 
@@ -1693,6 +1909,8 @@ def _extract_metadata_sources(meta_data: Mapping[str, object]) -> list[MetadataS
         or _stringify_preview_value(meta_data.get("openlibrary_book_id"))
     )
     isbn_value = _stringify_preview_value(meta_data.get("isbn"))
+    asin_value = _stringify_preview_value(meta_data.get("asin")) or _stringify_preview_value(meta_data.get("book_asin"))
+    audible_url = _stringify_preview_value(meta_data.get("audible_url"))
 
     sources: list[MetadataSource] = []
     seen_keys: set[str] = set()
@@ -1800,6 +2018,16 @@ def _extract_metadata_sources(meta_data: Mapping[str, object]) -> list[MetadataS
             "google_books",
             "Google Books",
             isbn_value,
+        )
+
+    if category == "BOOK" and asin_value:
+        _append_metadata_source(
+            sources,
+            seen_keys,
+            "audible",
+            "Audible",
+            asin_value,
+            audible_url if _is_http_url(audible_url) else "",
         )
 
     if category == "MUSIC":
@@ -1963,6 +2191,7 @@ def _extract_execution_preview(meta_data: Mapping[str, object], fallback_path: s
     if not poster_url and tmdb_poster:
         poster_url = tmdb_poster if tmdb_poster.startswith("http") else f"https://image.tmdb.org/t/p/w500{tmdb_poster}"
     music = _music_preview_from_meta(meta_data)
+    detail_sections = _extract_preview_detail_sections(meta_data, music)
     genres = _string_list_preview_values(meta_data.get("genres")) or list(music.get("genres", []))
     networks = _string_list_preview_values(meta_data.get("networks"))
     audiobook_bitrate = _stringify_preview_value(meta_data.get("audiobook_bitrate"))
@@ -2014,6 +2243,7 @@ def _extract_execution_preview(meta_data: Mapping[str, object], fallback_path: s
         "game_system": _stringify_preview_value(meta_data.get("game_system")),
         "developer": _stringify_preview_value(meta_data.get("developer")),
         "music": music,
+        "detail_sections": detail_sections,
         "awaiting_input": False,
         "input_type": None,
     }
@@ -2091,6 +2321,7 @@ def _find_execution_preview(session_id: str) -> ExecutionPreview | None:
         "game_system": "",
         "developer": "",
         "music": {},
+        "detail_sections": [],
         "awaiting_input": bool(process_info.get("awaiting_input")),
         "input_type": process_info.get("input_type"),
         "progress": _progress_items_for_process(process_info),
@@ -2232,6 +2463,18 @@ class MetadataSource(TypedDict, total=False):
     url: str
 
 
+class PreviewDetailItem(TypedDict):
+    key: str
+    label: str
+    value: str
+
+
+class PreviewDetailSection(TypedDict):
+    key: str
+    label: str
+    items: list[PreviewDetailItem]
+
+
 class ProgressItem(TypedDict, total=False):
     id: str
     label: str
@@ -2290,6 +2533,7 @@ class ExecutionPreview(TypedDict, total=False):
     game_system: str
     developer: str
     music: dict[str, object]
+    detail_sections: list[PreviewDetailSection]
     awaiting_input: bool
     input_type: str | None
     progress: list[ProgressItem]
@@ -2303,6 +2547,7 @@ class ConfigItem(TypedDict, total=False):
     children: list[ConfigItem]
     help: list[str]
     subsection: str | bool
+    override_fields: list[ConfigItem]
 
 
 class ConfigSection(TypedDict, total=False):
@@ -2929,6 +3174,41 @@ def _remove_config_key_in_source(source: str, key_path: list[str]) -> str:
     return source  # Should not reach here
 
 
+_RELEASE_GROUP_OVERRIDE_FIELDS = (
+    "custom_description_header",
+    "screenshot_header",
+    "disc_menu_header",
+    "audio_spectrogram_header",
+    "dynamic_hdr_plot_header",
+    "tonemapped_header",
+    "custom_signature",
+)
+
+
+def _is_release_group_override_path(path: list[str]) -> bool:
+    """Identify the complete DEFAULT or tracker-specific release-group mapping."""
+    return path == ["DEFAULT", "tag_overrides"] or (len(path) == 3 and path[0] == "TRACKERS" and path[2] == "tag_overrides")
+
+
+def _validate_release_group_overrides(value: object) -> None:
+    """Reject malformed maps and names that collide under description matching."""
+    if not isinstance(value, dict):
+        raise ValueError("Release group overrides must be a dictionary.")
+    seen: set[str] = set()
+    for name, fields in value.items():
+        if not isinstance(name, str) or not name.strip().lstrip("-") or any(ord(char) < 32 for char in name):
+            raise ValueError("Each release group needs a non-empty name without control characters.")
+        normalized_name = name.strip().lstrip("-").casefold()
+        if normalized_name in seen:
+            raise ValueError(f"Duplicate release group: {name}. Names are matched without case or leading hyphens.")
+        seen.add(normalized_name)
+        if not isinstance(fields, dict):
+            raise ValueError(f"Overrides for {name} must be a dictionary.")
+        for field, text in fields.items():
+            if not isinstance(field, str) or not field or (text is not None and not isinstance(text, str)):
+                raise ValueError(f"Overrides for {name} must contain text fields or null values.")
+
+
 def _build_config_items(
     example_section: dict[str, Any],
     user_section: dict[str, Any],
@@ -2942,6 +3222,8 @@ def _build_config_items(
     merged_keys: list[str] = [str(key) for key in example_section]
     if user_section:
         merged_keys.extend([str(key) for key in user_section if key not in example_section])
+    if len(path) == 2 and path[0] == "TRACKERS" and "tag_overrides" not in merged_keys:
+        merged_keys.append("tag_overrides")
 
     current_subsection: str | None = None
     subsection_items: list[ConfigItem] = []
@@ -2969,12 +3251,23 @@ def _build_config_items(
         if subsection_label != current_subsection:
             flush_subsection()
             current_subsection = subsection_label
-        if isinstance(example_value, Mapping) or isinstance(user_value, Mapping):
+        if _is_release_group_override_path(key_path):
+            # Example group names are documentation, not inherited user entries.
+            item: ConfigItem = {
+                "key": key,
+                "value": _json_safe(user_value if key in user_dict else {}),
+                "example_value": {},
+                "source": "config" if key in user_dict else "example",
+                "children": [],
+                "help": help_text or comments_map.get("DEFAULT/tag_overrides", []),
+                "override_fields": [{"key": field, "help": comments_map.get(f"DEFAULT/{field}", [])} for field in _RELEASE_GROUP_OVERRIDE_FIELDS],
+            }
+        elif isinstance(example_value, Mapping) or isinstance(user_value, Mapping):
             example_value = _as_dict(example_value) or {}
             user_value = _as_dict(user_value) or {}
             children = _build_config_items(example_value, user_value, comments_map, subsection_map, key_path)
             source: Literal["config", "example"] = "config" if key in user_dict else "example"
-            item: ConfigItem = {
+            item = {
                 "key": key,
                 "source": source,
                 "children": children,
@@ -4457,6 +4750,14 @@ def _configured_cookie_tracker_names(
     return configured
 
 
+def _tracker_codebase(tracker_class: Any) -> str | None:
+    """Expose known tracker families without guessing from ungrouped modules."""
+    module_parts = str(getattr(tracker_class, "__module__", "")).split(".")
+    if len(module_parts) < 4 or module_parts[:2] != ["src", "trackers"]:
+        return None
+    return {"UNIT3D": "UNIT3D", "GAZELLE": "Gazelle", "NEXUSPHP": "NexusPHP", "AVISTAZ": "AvistaZ"}.get(module_parts[2])
+
+
 def _tracker_destination_type(tracker_class: Any) -> str:
     """Return the WebUI destination category without changing tracker IDs."""
     return "usenet" if bool(getattr(tracker_class, "is_usenet", False)) else "torrent"
@@ -4647,15 +4948,6 @@ def get_trackers():
     config_path = base_dir / "data" / "config.py"
     user_config = _load_config_from_file(config_path) or {}
 
-    trackers_section_raw = user_config.get("TRACKERS", {})
-    trackers_section = cast(dict[str, Any], trackers_section_raw) if isinstance(trackers_section_raw, Mapping) else {}
-    default_trackers_val = trackers_section.get("default_trackers", "")
-    default_trackers_list = []
-    if isinstance(default_trackers_val, str):
-        default_trackers_list = [t.strip().upper() for t in default_trackers_val.split(",") if t.strip()]
-    elif isinstance(default_trackers_val, list):
-        default_trackers_list = [str(t).strip().upper() for t in default_trackers_val if str(t).strip()]
-
     # Load tracker_class_map from src.trackersetup
     try:
         from src.trackersetup import tracker_class_map
@@ -4665,6 +4957,34 @@ def get_trackers():
     example_config = _load_config_from_file(CODE_DIR / "data" / "example_config.py") or {}
     example_trackers_raw = example_config.get("TRACKERS", {})
     example_trackers = cast(dict[str, Any], example_trackers_raw) if isinstance(example_trackers_raw, Mapping) else {}
+
+    from src.prowlarr import ProwlarrError, apply_prowlarr_credentials, configured_prowlarr, fetch_prowlarr_credentials
+
+    prowlarr_sources: set[str] = set()
+    prowlarr_cookie_trackers: set[str] = set()
+    try:
+        if prowlarr_connection := configured_prowlarr(user_config):
+            prowlarr_report = fetch_prowlarr_credentials(
+                prowlarr_connection[0],
+                prowlarr_connection[1],
+                set(tracker_class_map),
+            )
+            prowlarr_sources = apply_prowlarr_credentials(user_config, prowlarr_report)
+            prowlarr_cookie_trackers = {name for name, credential in prowlarr_report.credentials.items() if credential.cookie}
+    except ProwlarrError:
+        # The tracker catalogue remains usable with local configuration when
+        # the optional Prowlarr instance is unavailable.
+        prowlarr_sources = set()
+        prowlarr_cookie_trackers = set()
+
+    trackers_section_raw = user_config.get("TRACKERS", {})
+    trackers_section = cast(dict[str, Any], trackers_section_raw) if isinstance(trackers_section_raw, Mapping) else {}
+    default_trackers_val = trackers_section.get("default_trackers", "")
+    default_trackers_list = []
+    if isinstance(default_trackers_val, str):
+        default_trackers_list = [t.strip().upper() for t in default_trackers_val.split(",") if t.strip()]
+    elif isinstance(default_trackers_val, list):
+        default_trackers_list = [str(t).strip().upper() for t in default_trackers_val if str(t).strip()]
 
     cookie_trackers: set[str] = set()
     try:
@@ -4676,6 +4996,9 @@ def get_trackers():
     else:
         cookie_trackers = _configured_cookie_tracker_names(tracker_class_map, user_config, STATE_DIR, find_cookie_file)
 
+    prowlarr_sources -= cookie_trackers
+    cookie_trackers |= prowlarr_cookie_trackers
+
     configured_trackers = _configured_tracker_names(
         trackers_section,
         example_trackers,
@@ -4685,6 +5008,8 @@ def get_trackers():
     )
 
     trackers_data = []
+    from src.api_key_expiry import get_api_key_expiry
+
     for tracker_name, tracker_class in tracker_class_map.items():
         display_name = getattr(tracker_class, "display_name", tracker_name)
         base_url = getattr(tracker_class, "base_url", "")
@@ -4692,6 +5017,9 @@ def get_trackers():
         optional_setup_keys = sorted(str(key) for key in (getattr(tracker_class, "optional_setup_keys", ()) or ()))
         destination_type = _tracker_destination_type(tracker_class)
         supported_categories = _tracker_supported_categories(tracker_class)
+        expiry_supported = bool(getattr(tracker_class, "api_key_expiry_supported", False))
+        tracker_config = trackers_section.get(tracker_name, {})
+        api_key = str(tracker_config.get("api_key") or "").strip() if isinstance(tracker_config, dict) else ""
         favicon_url = ""
         static_dir = Path(__file__).parent / "static"
         for ext in ["png", "svg", "ico"]:
@@ -4704,9 +5032,13 @@ def get_trackers():
             {
                 "name": tracker_name,
                 "display_name": display_name,
+                "codebase": _tracker_codebase(tracker_class),
                 "base_url": base_url,
                 "favicon": favicon_url,
                 "configured": tracker_name.upper() in configured_trackers,
+                "credential_source": ("prowlarr" if tracker_name.upper() in prowlarr_sources else "local" if tracker_name.upper() in configured_trackers else None),
+                "api_key_expiry_supported": expiry_supported,
+                "api_key_expiry": get_api_key_expiry(tracker_name, api_key, base_url, STATE_DIR) if expiry_supported else None,
                 "auth_type": auth_type,
                 "optional_setup_keys": optional_setup_keys,
                 "cookie_configured": tracker_name.upper() in cookie_trackers,
@@ -4718,6 +5050,137 @@ def get_trackers():
     trackers_data.sort(key=lambda x: x["display_name"].lower())
 
     return jsonify({"success": True, "default_trackers": default_trackers_list, "trackers": trackers_data})
+
+
+@app.route("/api/tracker_api_key_status", methods=["POST"])
+@limiter.limit("120 per hour", key_func=_rate_limit_key_func)
+def tracker_api_key_status():
+    """Read cached expiry or explicitly check a saved/draft tracker API key."""
+    if not _is_authenticated():
+        return jsonify({"success": False, "error": "Authentication required (web session)"}), 401
+    if not _verify_csrf_header() or not _verify_same_origin():
+        return jsonify({"success": False, "error": "CSRF/Origin validation failed"}), 403
+
+    import httpx
+
+    from src.api_key_expiry import get_api_key_expiry, record_api_key_expiry
+    from src.prowlarr import ProwlarrError, configured_prowlarr, fetch_prowlarr_credentials
+    from src.trackersetup import tracker_class_map
+
+    data = _request_json_dict()
+    tracker = str(data.get("tracker") or "").strip().upper()
+    tracker_class = tracker_class_map.get(tracker)
+    if not tracker_class or not getattr(tracker_class, "api_key_expiry_supported", False):
+        return jsonify({"success": False, "error": "API key expiry checks are not supported for this tracker"}), 400
+    config = _load_config_from_file(STATE_DIR / "data" / "config.py") or {}
+    if "api_key" in data:
+        api_key = data["api_key"]
+    else:
+        trackers_config = config.get("TRACKERS")
+        tracker_config = trackers_config.get(tracker) if isinstance(trackers_config, Mapping) else None
+        api_key = tracker_config.get("api_key", "") if isinstance(tracker_config, Mapping) else ""
+    if not isinstance(api_key, str) or "\r" in api_key or "\n" in api_key:
+        return jsonify({"success": False, "error": "Enter a valid API key"}), 400
+    api_key = api_key.strip()
+    source = "local"
+    refresh = data.get("refresh") is True
+    if not api_key and refresh:
+        try:
+            if connection := configured_prowlarr(config):
+                report = fetch_prowlarr_credentials(*connection, {tracker})
+                credential = report.credentials.get(tracker)
+                api_key = credential.api_key if credential else ""
+                source = "prowlarr"
+        except ProwlarrError as error:
+            return jsonify({"success": False, "error": str(error)}), 400
+    base_url = tracker_class.base_url
+    if not refresh:
+        return jsonify({"success": True, "expiry": get_api_key_expiry(tracker, api_key, base_url, STATE_DIR)})
+    if not api_key:
+        return jsonify({"success": False, "error": "Enter an API key or configure a Prowlarr credential source"}), 400
+
+    # Use the existing search endpoint/permissions, not /user's additional
+    # account-information permission. The destination comes from UA's tracker
+    # definition; draft config cannot redirect a credential to another host.
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=False) as client:
+            response = client.get(
+                tracker_class.search_url,
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                params={"perPage": 1},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict) or payload.get("success") is False:
+            return jsonify({"success": False, "error": "The tracker returned an unsuccessful API response"}), 400
+        observed = record_api_key_expiry(tracker, api_key, base_url, response, STATE_DIR, payload=payload)
+    except httpx.HTTPStatusError as error:
+        code = error.response.status_code
+        message = (
+            "The tracker rejected the API key. It may be invalid, revoked or expired."
+            if code == 401
+            else "The tracker denied the API request. Check the key's search/download permissions and account access."
+            if code == 403
+            else f"The tracker returned HTTP {code}. Try again later."
+        )
+        return jsonify({"success": False, "error": message}), 400
+    except httpx.RequestError:
+        return jsonify({"success": False, "error": "The tracker could not be reached. Try again later."}), 400
+    except ValueError:
+        return jsonify({"success": False, "error": "The tracker did not return a valid JSON API response"}), 400
+
+    expiry = observed or get_api_key_expiry(tracker, api_key, base_url, STATE_DIR)
+    return jsonify(
+        {
+            "success": True,
+            "expiry": expiry,
+            "credential_source": source,
+            "message": "API key accepted." if observed else "API key accepted, but expiry was not reported. Any date shown is the last observed expiry.",
+        }
+    )
+
+
+@app.route("/api/config_test_prowlarr", methods=["POST"])
+@limiter.limit("30 per hour", key_func=_rate_limit_key_func)
+def config_test_prowlarr():
+    """Test draft Prowlarr settings and return credential-free metadata."""
+    if not _is_authenticated():
+        return jsonify({"success": False, "error": "Authentication required (web session)"}), 401
+    if not _verify_csrf_header() or not _verify_same_origin():
+        return jsonify({"success": False, "error": "CSRF/Origin validation failed"}), 403
+
+    data = _request_json_dict()
+    base_url = str(data.get("url") or "").strip()
+    api_key = str(data.get("api_key") or "").strip()
+    if not base_url or not api_key:
+        return jsonify({"success": False, "error": "Prowlarr URL and API key are required"}), 400
+
+    from src.prowlarr import ProwlarrError, fetch_prowlarr_credentials
+    from src.trackersetup import tracker_class_map
+
+    try:
+        report = fetch_prowlarr_credentials(base_url, api_key, set(tracker_class_map), include_status=True)
+    except ProwlarrError as error:
+        return jsonify({"success": False, "error": str(error)}), 400
+    except Exception:
+        return jsonify({"success": False, "error": "Unable to test the Prowlarr connection"}), 500
+
+    api_key_trackers = sorted(name for name, credential in report.credentials.items() if credential.api_key)
+    cookie_trackers = sorted(name for name, credential in report.credentials.items() if credential.cookie)
+    return jsonify(
+        {
+            "success": True,
+            "message": f"Connected to Prowlarr {report.version or '(version unavailable)'}. Found credentials for {len(report.credentials)} supported tracker(s).",
+            "version": report.version,
+            "enabled_indexers": report.enabled_indexers,
+            "matched_indexers": report.matched_indexers,
+            "credential_trackers": sorted(report.credentials),
+            "api_key_trackers": api_key_trackers,
+            "cookie_trackers": cookie_trackers,
+            "masked_credentials": report.masked_credentials,
+            "unsupported_indexers": report.unsupported_indexers,
+        }
+    )
 
 
 @app.route("/api/config_set_tracker_overrides", methods=["POST"])
@@ -4841,7 +5304,23 @@ def config_update():
     key = path[-1] if path else ""
     is_optional_arr_field = len(path) == 2 and path[0] == "DEFAULT" and re.fullmatch(r"(?:sonarr|radarr)_(?:url|api_key)_[1-3]", key) is not None
     force_remove_optional_arr_field = is_optional_arr_field and data.get("remove") is True
-    if key in ["injecting_client_list", "searching_client_list"]:
+    is_tracker_default_override = len(path) == 3 and path[0] == "TRACKERS" and key in _TRACKER_DEFAULT_OVERRIDE_KEYS
+    force_remove_tracker_override = is_tracker_default_override and data.get("remove") is True
+    if is_tracker_default_override and example_value is None and isinstance(_get_nested_value(example_config, path[:2]), Mapping):
+        # Existing overrides may outlive a field's entry in the tracker template.
+        # Keep those displayed fields editable/removable without adding new ones.
+        saved_config = _load_config_from_file(config_path) or {}
+        saved_tracker = _as_dict(_get_nested_value(saved_config, path[:2])) or {}
+        if key in saved_tracker:
+            example_value = _get_nested_value(example_config, ["DEFAULT", key])
+            if example_value is None:
+                example_value = saved_tracker[key] if saved_tracker[key] is not None else ""
+    is_release_group_override = _is_release_group_override_path(path)
+    if is_release_group_override:
+        if not isinstance(_get_nested_value(example_config, path[:-1]), Mapping):
+            return jsonify({"success": False, "error": "Unknown release group override scope"}), 400
+        example_value = {}
+    elif key in ["injecting_client_list", "searching_client_list"]:
         example_value = []  # Default to empty list
     elif is_optional_arr_field:
         example_value = ""
@@ -4849,12 +5328,20 @@ def config_update():
         return jsonify({"success": False, "error": "Path not found in example config"}), 400
 
     coerced_value = _coerce_config_value(raw_value, example_value)
+    if is_release_group_override:
+        try:
+            _validate_release_group_overrides(coerced_value)
+        except ValueError as error:
+            return jsonify({"success": False, "error": str(error)}), 400
     new_value_literal = _python_literal(coerced_value)
 
-    # Keep optional WebUI-managed values out of config.py when they are unused.
+    # Remove unchecked tracker overrides so subsequent DEFAULT changes are inherited.
+    # Also keep optional WebUI-managed values out of config.py when they are unused.
     key = path[-1] if path else ""
-    should_remove_empty_value = (key in ["injecting_client_list", "searching_client_list"] and coerced_value == []) or (
-        is_optional_arr_field and (coerced_value == "" or force_remove_optional_arr_field)
+    should_remove_empty_value = (
+        (key in ["injecting_client_list", "searching_client_list"] and coerced_value == [])
+        or (is_optional_arr_field and (coerced_value == "" or force_remove_optional_arr_field))
+        or force_remove_tracker_override
     )
     if should_remove_empty_value:
         # Remove the key from config if it exists
@@ -6291,6 +6778,10 @@ def execute_command():
 
                             # Flush on newline or when buffer grows large
                             if _should_flush_subprocess_output(buffers[output_type], char):
+                                if buffers[output_type].strip() == PROMPT_SOUND_STDOUT_MARKER:
+                                    buffers[output_type] = ""
+                                    yield f"data: {json.dumps({'type': 'prompt_sound'})}\n\n"
+                                    continue
                                 if not prompt_type:
                                     _set_process_awaiting_input_if_current(session_id, process_state, False)
                                 chunk = buffers[output_type]

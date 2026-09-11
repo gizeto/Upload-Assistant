@@ -10,7 +10,8 @@ config: dict[str, Any] = {
         "verbose_notification": False,
         # Number of hours to reuse a successful update check. Set to 0 to check every run.
         "update_notification_cache_hours": 4,
-        # Set to True to play a bell sound when prompting for confirmation.
+        # Set to True to play a bell sound before release confirmation (CLI and WebUI).
+        # WebUI sound plays in the browser; allow site audio and keep the tab unmuted.
         "sfx_on_prompt": True,
         # Set to True to apply argument overrides from data/templates/user-args.json.
         "user_overrides": False,
@@ -212,6 +213,12 @@ config: dict[str, Any] = {
         # Set to True to also search PreDB for a matching scene release.
         # PreDB can be inconsistent or time out, but it may find releases absent from SRRDB.
         "check_predb": False,
+        # --- PROWLARR CREDENTIAL FALLBACK ---
+        # Optional Prowlarr base URL and API key. When both are set, Upload
+        # Assistant fills missing supported tracker API keys and cookies in
+        # memory at the start of each run. Local credentials always take precedence.
+        "prowlarr_url": "",
+        "prowlarr_api_key": "",
         # --- IMAGE HOSTING ---
         # Order of image hosts, with the primary host first and backups after it.
         # Available image hosts: dalexni, imgbb, imgbox, lensdump, lostimg, midnightscene, onlyimage, passtheimage, pixhost, ptscreens, seedpool_cdn, sharex, utppm, zipline
@@ -386,15 +393,16 @@ config: dict[str, Any] = {
         # case-insensitively, with or without their leading hyphen.
         # Per-tracker tag_overrides take precedence over these DEFAULT overrides.
         "tag_overrides": {
-            "MyAwesomeGroupTag": {
-                "custom_description_header": "[center]MyAwesomeGroupTag release[/center]",
-                "screenshot_header": "[h2]MyAwesomeGroupTag Screenshots[/h2]",
-                "disc_menu_header": "[h2]MyAwesomeGroupTag Disc Menu Screenshots[/h2]",
-                "audio_spectrogram_header": "[h2]MyAwesomeGroupTag Audio Spectrogram[/h2]",
-                "dynamic_hdr_plot_header": "[h2]MyAwesomeGroupTag Dynamic HDR Metadata[/h2]",
-                "tonemapped_header": "[center]MyAwesomeGroupTag SDR reference screenshots[/center]",
-                "custom_signature": "[center]MyAwesomeGroupTag signature[/center]",
-            },
+            # Uncomment and rename this example group to configure your own overrides.
+            # "MyAwesomeGroupTag": {
+            #     "custom_description_header": "[center]MyAwesomeGroupTag release[/center]",
+            #     "screenshot_header": "[h2]MyAwesomeGroupTag Screenshots[/h2]",
+            #     "disc_menu_header": "[h2]MyAwesomeGroupTag Disc Menu Screenshots[/h2]",
+            #     "audio_spectrogram_header": "[h2]MyAwesomeGroupTag Audio Spectrogram[/h2]",
+            #     "dynamic_hdr_plot_header": "[h2]MyAwesomeGroupTag Dynamic HDR Metadata[/h2]",
+            #     "tonemapped_header": "[center]MyAwesomeGroupTag SDR reference screenshots[/center]",
+            #     "custom_signature": "[center]MyAwesomeGroupTag signature[/center]",
+            # },
         },
         # --- BLU-RAY SETTINGS ---
         # Set to True to use the largest Blu-ray playlist without a selection prompt.

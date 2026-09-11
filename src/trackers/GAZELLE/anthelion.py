@@ -15,7 +15,7 @@ from src.console import logger, prompt_in_thread
 from src.get_desc import DescriptionBuilder
 from src.mediainfo import strip_report_by_line
 from src.meta import Meta
-from src.torrentcreate import TorrentCreator
+from src.torrent_policy import ANTHELION_POLICY
 from src.trackers.common import Common
 
 Config = dict[str, Any]
@@ -111,6 +111,7 @@ class Anthelion:
     base_url = "https://anthelion.me"
     api_url = f"{base_url}/api.php"
     supported_categories = ("MOVIE",)
+    torrent_policy = ANTHELION_POLICY
     tracker_urls = ("tracker.anthelion.me",)
 
     def __init__(self, config: Config):
@@ -149,43 +150,46 @@ class Anthelion:
         meta.ant_user_tags = False
         no_tags = False
         tags: list[str] = []
+        allowed_tags = {
+            "action",
+            "adventure",
+            "animation",
+            "comedy",
+            "crime",
+            "documentary",
+            "drama",
+            "family",
+            "fantasy",
+            "history",
+            "horror",
+            "music",
+            "mystery",
+            "romance",
+            "sci.fi",
+            "thriller",
+            "war",
+            "western",
+        }
+
+        def normalize_genres(genres: str | list[str]) -> list[str]:
+            values = [genres] if isinstance(genres, str) else genres
+            normalized: list[str] = []
+            for genre in values:
+                tag = genre.replace(" ", ".").lower()
+                if tag == "science.fiction":
+                    tag = "sci.fi"
+                if tag in allowed_tags:
+                    normalized.append(tag)
+            return normalized
+
         if meta.genres:
             genres = meta.genres
-            # Handle both string and list formats
-            if isinstance(genres, str):
-                tags.append(genres.replace(" ", ".").lower())
-            else:
-                tags.extend(genre.replace(" ", ".").lower() for genre in genres)
+            tags.extend(normalize_genres(genres))
         else:
             no_tags = True
         if no_tags and meta.imdb_info:
             imdb_genres = meta.imdb_info.get("genres", [])
-            # Handle both string and list formats
-            if isinstance(imdb_genres, str):
-                tags.append(imdb_genres.replace(" ", ".").lower())
-            else:
-                tags.extend(genre.replace(" ", ".").lower() for genre in imdb_genres)
-            allowed_tags = {
-                "action",
-                "adventure",
-                "animation",
-                "comedy",
-                "crime",
-                "documentary",
-                "drama",
-                "family",
-                "fantasy",
-                "history",
-                "horror",
-                "music",
-                "mystery",
-                "romance",
-                "sci.fi",
-                "thriller",
-                "war",
-                "western",
-            }
-            tags = [tag for tag in tags if tag.lower() in allowed_tags]
+            tags.extend(normalize_genres(imdb_genres))
 
             if tags:
                 logger.info(f"{self.tracker}: [green]Using IMDb genres for tagging: {', '.join(tags)}")
@@ -246,21 +250,7 @@ class Anthelion:
         return ant_type
 
     async def upload(self, meta: Meta) -> bool:
-        torrent_filename = "BASE"
-        torrent_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/BASE.torrent"
-        torrent_file_size_kib = Path(torrent_path).stat().st_size / 1024
-        tracker_url: str = ""
-        if meta.mkbrr:
-            tracker_url = self.tracker_config.get("announce_url", "https://fake.tracker").strip()
-
-        # Trigger regeneration automatically if size constraints aren't met
-        if torrent_file_size_kib > 250:  # 250 KiB
-            logger.info(f"{self.tracker}: [yellow]Existing .torrent exceeds 250 KiB and will be regenerated to fit constraints.")
-            meta.max_piece_size = 128  # 128 MiB
-            await TorrentCreator.create_torrent(meta, str(Path(str(meta.path))), "ANTHELION", tracker_url=tracker_url)
-            torrent_filename = "ANTHELION"
-
-        await self.common.create_torrent_for_upload(meta, self.tracker, self.source_flag, torrent_filename=torrent_filename)
+        await self.common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
         flags = await self.get_flags(meta)
         audioformat = await self.get_audio(meta)
         if not audioformat:
@@ -479,7 +469,7 @@ class Anthelion:
         if meta.tmdb:
             params["tmdbid"] = str(meta.tmdb)
         elif meta.imdb_id:
-            params["imdbid"] = str(meta.imdb)
+            params["imdbid"] = str(meta.imdb_id)
 
         headers = {
             "X-API-Key": self.api_key,

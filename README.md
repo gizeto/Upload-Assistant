@@ -5,7 +5,16 @@
 
 [![Python Version](https://img.shields.io/badge/Python-3.14%2B-blue?logo=python&logoColor=white)](https://www.python.org/) [![License](https://img.shields.io/badge/License-UAPL%20v1.0-orange)](LICENSE) [![Ruff](https://img.shields.io/badge/Ruff-000000?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff) [![Pyright](https://img.shields.io/badge/Pyright-strict-brightgreen)](https://github.com/microsoft/pyright) [![code style: prettier](https://img.shields.io/badge/code%20style-prettier-ff69b4.svg)](https://prettier.io) [![Docker Image CI](https://github.com/wastaken7/Upload-Assistant/actions/workflows/docker-image.yml/badge.svg)](https://github.com/wastaken7/Upload-Assistant/actions/workflows/docker-image.yml)
 
+---
+
+<img width="1920" height="946" alt="image" src="https://github.com/user-attachments/assets/aaea8cec-28fd-42fb-ab73-d11c16f4832e" />
+
+---
+
+<img width="1920" height="946" alt="image" src="https://github.com/user-attachments/assets/9704ab62-3bec-4e12-9223-3c0331505687" />
 </div>
+
+---
 
 > [!IMPORTANT]
 > **This is a modified version of the Upload Assistant project and is not affiliated with or endorsed by Audionut.**
@@ -57,6 +66,10 @@ This branch introduces new media categories and automation features not present 
   - **Discogs & MusicBrainz APIs**: Optionally queries external APIs (Discogs via release/master ID or URL, and MusicBrainz) for metadata enrichment.
   - **Artwork & Cover Extraction**: Automatically searches for local cover images or extracts embedded artwork from FLAC/MP3/M4A tags to upload to image hosts.
   - **Preflight & Rule Validation**: Enforces mechanical validation for audio formats, sample/bit rates, track counts, and hybrid setups before uploading.
+- **Adult Video (`XXX` Category)**:
+  - **Automatic Detection & Metadata**: Recognizes supported adult-platform release names, extracts common title, studio, and date fields, and builds descriptive keywords.
+  - **Contact Sheets & Artwork**: Generates one configurable contact sheet per video and creates a fallback cover from the source when artwork is not supplied.
+  - **Workflow Guide**: See the dedicated [XXX category upload guide](docs/xxx-upload.md) for naming, overrides, WebUI usage, and supported destinations.
 
 ### 2. Audio Stream Spectrogram Generation
 

@@ -22,12 +22,14 @@ from langcodes import tag_parser
 from torf import Torrent
 from unidecode import unidecode
 
+from src.api_key_expiry import observe_tracker_response
 from src.bbcode import BBCODE
 from src.console import console, logger, prompt_in_thread
 from src.exportmi import export_info
 from src.genre_map import AUDIBLE_ENG_GENRE_MAP, AUDIBLE_PTBR_GENRE_MAP, ENG_TO_PTBR_GENRE_MAP
 from src.languages import languages_manager
 from src.meta import Meta
+from src.torrent_manifest import TorrentManifest
 from src.usenetcreate import verify_nzb_has_password
 
 
@@ -249,10 +251,20 @@ class Common:
         if isinstance(tracker_config, dict):
             allow_ext_subtitles = tracker_config.get("allow_ext_subtitles", False)
         if allow_ext_subtitles:
-            subs_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/BASE_SUBS.torrent"
-            if await self.path_exists(subs_path):
+            subs_path = TorrentManifest(meta.base_dir, meta.uuid).default_path("base_subs")
+            if subs_path is not None:
                 torrent_filename = "BASE_SUBS"
         return torrent_filename
+
+    async def get_base_torrent_path(self, meta: Meta, tracker: str, tracker_config: Any) -> Path | None:
+        """Resolve a tracker's selected reusable base from the canonical manifest."""
+        manifest = TorrentManifest(meta.base_dir, meta.uuid)
+        selected = manifest.selected_path(tracker)
+        if selected is not None:
+            return selected
+        layout = "base_subs" if await self.get_torrent_filename(meta, tracker_config) == "BASE_SUBS" else "base"
+        entry = manifest.select(tracker, layout)
+        return manifest.entry_path(entry) if entry is not None else None
 
     async def create_torrent_for_upload(
         self,
@@ -266,9 +278,12 @@ class Common:
     ) -> None:
         tracker_cfg = self.config.get("TRACKERS", {}).get(tracker, {})
         if torrent_filename == "BASE":
-            torrent_filename = await self.get_torrent_filename(meta, tracker_cfg)
-
-        path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/{torrent_filename}.torrent"
+            base_path = await self.get_base_torrent_path(meta, tracker, tracker_cfg)
+            if base_path is None:
+                raise FileNotFoundError(f"{tracker}: no selected base torrent is available in the manifest")
+            path = str(base_path)
+        else:
+            path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/{torrent_filename}.torrent"
         if await self.path_exists(path):
             loop = asyncio.get_running_loop()
             new_torrent = await loop.run_in_executor(None, lambda: Torrent.read(path))
@@ -2591,6 +2606,7 @@ class Common:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url=url, params=params, headers=headers)
                 json_response = response.json()
+                observe_tracker_response(self.config, meta, tracker, response, json_response)
         except (httpx.RequestError, httpx.TimeoutException) as e:
             logger.info(f"[yellow]Request error in unit3d_region_distributor: {e}[/yellow]")
             return
@@ -2670,6 +2686,7 @@ class Common:
                     logger.info(f"Searching for information on [bold cyan]{tracker}[/bold cyan]")
                 response = await client.get(url=url, params=params, headers=headers)
                 json_response = response.json()
+                observe_tracker_response(self.config, meta, tracker, response, json_response)
         except (httpx.RequestError, httpx.TimeoutException) as e:
             logger.info(f"[yellow]Request error in unit3d_torrent_info: {e}[/yellow]")
             return None, None, None, None, None, None, None, [], None

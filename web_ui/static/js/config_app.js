@@ -1,5 +1,7 @@
 const { useEffect, useMemo, useRef, useState } = React;
 const useModalFocus = window.useUAModalFocus;
+const { state: apiKeyExpiryState, label: apiKeyExpiryLabel } =
+  window.UAApiKeyExpiry;
 
 const CONFIG_FIELD_RESET_EVENT = "ua-config-field-reset";
 const CONFIG_COMPACT_LAYOUT_BREAKPOINT = 768;
@@ -254,6 +256,11 @@ const Tooltip = ({ children, content, className = "" }) => {
         ref: triggerRef,
         onMouseEnter: showTooltip,
         onMouseLeave: hideTooltip,
+        onFocus: showTooltip,
+        onBlur: hideTooltip,
+        onKeyDown: (event) => {
+          if (event.key === "Escape") hideTooltip();
+        },
         onClick: toggleTooltip,
         className: `cursor-help ${className}`,
       },
@@ -414,6 +421,8 @@ const RailLogoutIcon = () => (
 );
 
 function ConfigApplicationRail({
+  trackers,
+  onOpenTracker,
   isMobileLayout,
   colorTheme,
   onColorThemeChange,
@@ -485,6 +494,11 @@ function ConfigApplicationRail({
       <div className="min-h-4 flex-1"></div>
 
       <div className="ua-app-rail-footer grid shrink-0 gap-1 border-t p-2">
+        <window.UAApiKeyAlerts
+          trackers={trackers}
+          appBase={APP_BASE}
+          onOpenTracker={onOpenTracker}
+        />
         <button
           type="button"
           className={`ua-app-rail-button rounded-lg ${updateStatus?.update_available ? "ua-update-rail-button" : ""}`}
@@ -640,6 +654,7 @@ const DEFAULT_WORKFLOW_GROUPS = [
     label: "Upload Workflow",
     headings: [
       "TRACKER SEARCH AND IMPORT",
+      "PROWLARR CREDENTIAL FALLBACK",
       "TRACKER CHECKS AND UPLOAD",
       "TORRENT CREATION",
       "POST-UPLOAD",
@@ -775,6 +790,7 @@ const CONFIG_HEADING_LABELS = {
   "METADATA CACHING": "Metadata Caching",
   "MUSIC METADATA": "Music Metadata",
   "TRACKER SEARCH AND IMPORT": "Tracker Search and Import",
+  "PROWLARR CREDENTIAL FALLBACK": "Prowlarr Credential Fallback",
   "IMAGE HOSTING": "Image Hosting",
   "SCREENSHOT CAPTURE AND PROCESSING": "Screenshot Capture and Processing",
   "SCREENSHOT ENHANCEMENTS": "Screenshot Enhancements",
@@ -802,6 +818,8 @@ const CONFIG_HEADING_LABELS = {
 const CONFIG_HEADING_DESCRIPTIONS = {
   "EXTERNAL TOOL PATHS":
     "Optional executable overrides. Leave fields blank to use automatically managed tools or executables on the system PATH. Check Tools detects their availability without downloading or installing anything.",
+  "PROWLARR CREDENTIAL FALLBACK":
+    "Use enabled Prowlarr indexers as a live fallback for missing tracker API keys and cookies. Values remain in memory and local credentials take precedence.",
 };
 
 const EXTERNAL_TOOL_KEYS = [
@@ -831,6 +849,7 @@ const getConfigHeadingDescription = (value) =>
 
 const UPLOAD_WORKFLOW_HEADING_ORDER = [
   "TRACKER SEARCH AND IMPORT",
+  "PROWLARR CREDENTIAL FALLBACK",
   "TRACKER CHECKS",
   "TORRENT CREATION",
   "UPLOAD BEHAVIOUR",
@@ -1016,6 +1035,7 @@ const isSensitiveKeyForPath = (key, pathParts) =>
 const isReadOnlyKeyForPath = (key, pathParts) =>
   pathParts.includes("TORRENT_CLIENTS") && key === "torrent_client";
 const DISPLAY_LABEL_OVERRIDES = {
+  tag_overrides: "Release Group Overrides",
   hide_screenshot_header_if_only_section: "Hide Standalone Screenshot Header",
   multiScreens: "Multiple Screenshots",
   charLimit: "Character Limit",
@@ -1270,6 +1290,14 @@ const INLINE_FIELD_HELP = {
     description:
       "Enter the BTN API key used to retrieve metadata from BroadcasTheNet.",
   },
+  prowlarr_url: {
+    description:
+      "Enter the Prowlarr base URL. The connection is used only when both fields are set.",
+  },
+  prowlarr_api_key: {
+    description:
+      "Used to read enabled indexer credentials at the start of each run. Retrieved values are never saved by UA.",
+  },
 };
 
 const imageHostApiKeys = {
@@ -1523,6 +1551,8 @@ const statusClassFor = (type, isDarkMode) => {
 
 // NumberInput component - styled number input using browser's built-in controls
 const NumberInput = ({
+  id,
+  inputLabel,
   value,
   onChange,
   min = 0,
@@ -1571,6 +1601,8 @@ const NumberInput = ({
   return (
     <input
       type="number"
+      id={id}
+      aria-label={inputLabel}
       value={draftValue}
       onChange={handleInputChange}
       onFocus={() => {
@@ -2509,12 +2541,15 @@ function ConfigLeafEditor({
   inlineBooleanLabel,
   labelOverride,
   hideHelp = false,
+  hideLabel = false,
   allImageHosts,
   usedImageHosts,
   torrentClients,
   externalToolStatus,
   onBrowseFolder,
   onValueChange,
+  inputAction,
+  labelStatus,
 }) {
   const path = [...pathParts, item.key];
   const fieldId = path.join("--");
@@ -2893,7 +2928,11 @@ function ConfigLeafEditor({
             : "grid grid-cols-1 items-start gap-3 px-4 py-3 md:grid-cols-12"
         }
       >
-        <div className={fullWidth ? "" : "col-span-1 md:col-span-4"}>
+        <div
+          className={
+            hideLabel ? "sr-only" : fullWidth ? "" : "col-span-1 md:col-span-4"
+          }
+        >
           <div className="flex items-center gap-2">
             <div className={labelClass}>{displayLabel}</div>
             {helpText && (
@@ -3008,7 +3047,11 @@ function ConfigLeafEditor({
             : "grid grid-cols-1 items-start gap-3 px-4 py-3 md:grid-cols-12"
         }
       >
-        <div className={fullWidth ? "" : "col-span-1 md:col-span-4"}>
+        <div
+          className={
+            hideLabel ? "sr-only" : fullWidth ? "" : "col-span-1 md:col-span-4"
+          }
+        >
           <div className="flex items-center gap-2">
             <div className={labelClass}>{displayLabel}</div>
             {helpText && (
@@ -3022,6 +3065,8 @@ function ConfigLeafEditor({
         </div>
         <div className={fullWidth ? "" : "col-span-1 md:col-span-7"}>
           <NumberInput
+            id={fieldId}
+            inputLabel={displayLabel}
             value={numericValue}
             onChange={(newValue) => {
               setNumericValue(newValue);
@@ -3281,7 +3326,11 @@ function ConfigLeafEditor({
             : "grid grid-cols-1 items-start gap-3 px-4 py-3 md:grid-cols-12"
         }
       >
-        <div className={fullWidth ? "" : "col-span-1 md:col-span-4"}>
+        <div
+          className={
+            hideLabel ? "sr-only" : fullWidth ? "" : "col-span-1 md:col-span-4"
+          }
+        >
           <div className="flex items-center gap-2">
             <div className={labelClass}>{displayLabel}</div>
             {helpText && (
@@ -3743,24 +3792,39 @@ function ConfigLeafEditor({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <label htmlFor={fieldId} className={labelClass}>
-          {displayLabel}
-        </label>
-        {credentialHelp?.required && (
-          <span className="ua-config-required-badge border font-semibold">
-            Required
-          </span>
-        )}
-        {helpText && !credentialHelp && (
-          <Tooltip content={helpText}>
-            <InfoIcon
-              className={`w-4 h-4 ${isDarkMode ? "text-gray-400 hover:text-gray-300" : "text-gray-500 hover:text-gray-600"}`}
-            />
-          </Tooltip>
-        )}
+      <div
+        className={
+          hideLabel
+            ? "sr-only"
+            : "flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"
+        }
+      >
+        <div className="flex items-center gap-2">
+          <label htmlFor={fieldId} className={labelClass}>
+            {displayLabel}
+          </label>
+          {credentialHelp?.required && (
+            <span className="ua-config-required-badge border font-semibold">
+              Required
+            </span>
+          )}
+          {helpText && !credentialHelp && (
+            <Tooltip content={helpText}>
+              <InfoIcon
+                className={`w-4 h-4 ${isDarkMode ? "text-gray-400 hover:text-gray-300" : "text-gray-500 hover:text-gray-600"}`}
+              />
+            </Tooltip>
+          )}
+        </div>
+        {labelStatus}
       </div>
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div
+        className={
+          inputAction
+            ? "ua-config-api-key-controls"
+            : "flex flex-col gap-2 sm:flex-row"
+        }
+      >
         <input
           id={fieldId}
           type="text"
@@ -3782,6 +3846,7 @@ function ConfigLeafEditor({
           disabled={readOnly}
           className={`${inputClass}${readOnly ? " opacity-70 cursor-not-allowed" : ""}`}
         />
+        {inputAction}
         {canBrowseTorrentFolder && (
           <button
             type="button"
@@ -3962,23 +4027,159 @@ function MetadataCacheServices({
   );
 }
 
+/** Keep disabled override drafts across settings pages until the editing session is reset. */
+const OverrideDraftContext = React.createContext(null);
+const TrackerDefaultValuesContext = React.createContext({});
+
+/** Read stored or staged overrides without substituting example groups. */
+const parseReleaseGroupOverrides = (value) => {
+  try {
+    const groups =
+      typeof value === "string" ? JSON.parse(value) : (value ?? {});
+    return groups &&
+      typeof groups === "object" &&
+      !Array.isArray(groups) &&
+      Object.values(groups).every(
+        (fields) =>
+          fields && typeof fields === "object" && !Array.isArray(fields),
+      )
+      ? groups
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Compare mappings consistently when edits restore the original configuration. */
+const serializeReleaseGroupOverrides = (groups) =>
+  JSON.stringify(
+    Object.fromEntries(
+      Object.keys(groups)
+        .sort()
+        .map((name) => [
+          name,
+          Object.fromEntries(
+            Object.keys(groups[name])
+              .sort()
+              .map((key) => [key, groups[name][key]]),
+          ),
+        ]),
+    ),
+  );
+
 function ReleaseGroupOverrides({
   item,
   pathParts,
-  depth,
-  isDarkMode,
-  allImageHosts,
-  usedImageHosts,
-  expandedGroups,
-  toggleGroup,
-  torrentClients,
+  pendingValue,
+  trackerItems,
+  pendingChanges,
   onValueChange,
 }) {
-  const groupKey = [...pathParts, item.key].join("/");
-  const isOpen = expandedGroups.has(groupKey);
-  const releaseGroups = item.children || [];
-  const helpText = (item.help || []).join(" ");
-  const groupLabel = releaseGroups.length === 1 ? "group" : "groups";
+  const draftCache = React.useContext(OverrideDraftContext);
+  const defaults = React.useContext(TrackerDefaultValuesContext);
+  const [isOpen, setIsOpen] = useState(false);
+  const [openNames, setOpenNames] = useState(new Set());
+  const [newName, setNewName] = useState("");
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameName, setRenameName] = useState("");
+  const [error, setError] = useState("");
+  const originalGroups = parseReleaseGroupOverrides(item.value);
+  const groups = parseReleaseGroupOverrides(pendingValue ?? item.value);
+  const fields = item.override_fields || [];
+  const path = [...pathParts, item.key];
+  const pathKey = path.join("/");
+  const fieldPrefix = path.join("--");
+  const groupNames = Object.keys(groups || {});
+  const globalGroups = parseReleaseGroupOverrides(defaults.tag_overrides);
+  const inheritedField = (name, key) =>
+    window.UAReleaseGroupInheritance.resolve({
+      name,
+      key,
+      pathParts,
+      defaults,
+      globalGroups,
+      trackerItems,
+      pendingChanges,
+    });
+
+  const setFieldEnabled = (name, key, enabled) => {
+    const nextValues = { ...groups[name] };
+    if (enabled) {
+      nextValues[key] =
+        draftCache.current.get(pathKey)?.get(name)?.get(key) ??
+        inheritedField(name, key).value;
+    } else {
+      // Remember disabled text only for this editing session, outside the saved map.
+      const scopeDrafts = draftCache.current.get(pathKey) || new Map();
+      const groupDrafts = scopeDrafts.get(name) || new Map();
+      groupDrafts.set(key, nextValues[key]);
+      scopeDrafts.set(name, groupDrafts);
+      draftCache.current.set(pathKey, scopeDrafts);
+      delete nextValues[key];
+    }
+    updateGroups({ ...groups, [name]: nextValues });
+  };
+
+  const updateGroups = (nextGroups) =>
+    onValueChange(path, serializeReleaseGroupOverrides(nextGroups), {
+      originalValue: serializeReleaseGroupOverrides(originalGroups),
+      isSensitive: false,
+      isRedacted: false,
+      readOnly: false,
+    });
+
+  const validateName = (name, currentName = null) => {
+    const normalize = window.UAReleaseGroupInheritance.normalizeName;
+    if (!normalize(name) || [...name].some((char) => char.charCodeAt(0) < 32)) {
+      return "Enter a release group name.";
+    }
+    if (
+      groupNames.some(
+        (existing) =>
+          existing !== currentName && normalize(existing) === normalize(name),
+      )
+    ) {
+      return "That release group already exists. Case and leading hyphens are ignored.";
+    }
+    return "";
+  };
+
+  const addGroup = () => {
+    setRenameTarget(null);
+    const name = newName.trim();
+    const message = validateName(name);
+    setError(message);
+    if (message) return;
+    updateGroups({ ...groups, [name]: {} });
+    setOpenNames((current) => new Set([...current, name]));
+    setNewName("");
+  };
+
+  const renameGroup = () => {
+    const name = renameName.trim();
+    const message = validateName(name, renameTarget);
+    setError(message);
+    if (message) return;
+    const scopeDrafts = draftCache.current.get(pathKey);
+    if (scopeDrafts?.has(renameTarget)) {
+      const groupDrafts = scopeDrafts.get(renameTarget);
+      scopeDrafts.delete(renameTarget);
+      scopeDrafts.set(name, groupDrafts);
+    }
+    updateGroups(
+      Object.fromEntries(
+        Object.entries(groups).map(([key, values]) => [
+          key === renameTarget ? name : key,
+          values,
+        ]),
+      ),
+    );
+    setOpenNames(
+      (current) =>
+        new Set([...current].map((key) => (key === renameTarget ? name : key))),
+    );
+    setRenameTarget(null);
+  };
 
   return (
     <section
@@ -3987,7 +4188,7 @@ function ReleaseGroupOverrides({
     >
       <button
         type="button"
-        onClick={() => toggleGroup(groupKey)}
+        onClick={() => setIsOpen((open) => !open)}
         className="ua-config-accordion-trigger flex w-full items-center justify-between gap-4 px-4 py-3 text-left"
         aria-expanded={isOpen}
       >
@@ -3995,117 +4196,303 @@ function ReleaseGroupOverrides({
           <span className="block text-sm font-semibold">
             Release Group Overrides
           </span>
-          {helpText && (
-            <span className="ua-config-service-description mt-1 block text-xs font-normal">
-              {helpText}
-            </span>
-          )}
+          <span className="ua-config-service-description mt-1 block text-xs font-normal">
+            {pathParts[0] === "TRACKERS"
+              ? "Override description text for release groups on this tracker."
+              : "Override description text for specific release groups."}
+          </span>
         </span>
-        <span className="flex shrink-0 items-center gap-3">
-          <span className="ua-config-service-action hidden text-xs font-medium sm:inline">
-            {isOpen
-              ? `Hide ${groupLabel}`
-              : `Show ${releaseGroups.length} ${groupLabel}`}
-          </span>
-          <span
-            className="ua-config-accordion-chevron transition-transform"
-            style={{
-              transform: isOpen ? "rotate(90deg)" : "rotate(0deg)",
-            }}
-            aria-hidden="true"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="m9 18 6-6-6-6"></path>
-            </svg>
-          </span>
+        <span className="ua-config-service-action shrink-0 text-xs font-medium">
+          {isOpen
+            ? "Hide"
+            : `Show ${groupNames.length} ${groupNames.length === 1 ? "group" : "groups"}`}
         </span>
       </button>
-
       {isOpen && (
-        <div className="ua-config-accordion-panel space-y-3 border-t p-4">
-          {releaseGroups.map((releaseGroup) => {
-            const releaseGroupKey = [
-              ...pathParts,
-              item.key,
-              releaseGroup.key,
-            ].join("/");
-            const isReleaseGroupOpen = expandedGroups.has(releaseGroupKey);
-            const fields = releaseGroup.children || [];
-            return (
-              <div
-                key={releaseGroupKey}
-                className="ua-config-accordion overflow-hidden rounded-lg border"
-                data-open={isReleaseGroupOpen ? "true" : "false"}
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleGroup(releaseGroupKey)}
-                  className="ua-config-accordion-trigger flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                  aria-expanded={isReleaseGroupOpen}
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-semibold">
-                      {releaseGroup.key}
-                    </span>
-                    <span className="ua-config-service-description mt-1 block text-xs font-normal">
-                      {fields.length} description overrides
-                    </span>
-                  </span>
-                  <span
-                    className="ua-config-accordion-chevron shrink-0 transition-transform"
-                    style={{
-                      transform: isReleaseGroupOpen
-                        ? "rotate(90deg)"
-                        : "rotate(0deg)",
-                    }}
-                    aria-hidden="true"
+        <div className="ua-config-accordion-panel space-y-4 border-t p-4">
+          {!originalGroups || !groups ? (
+            <p role="alert" className="text-sm text-red-500">
+              The existing release group configuration is not a dictionary of
+              groups. Correct it in config.py before editing here.
+            </p>
+          ) : (
+            <>
+              <p className="ua-config-service-description text-xs leading-relaxed">
+                For matching release groups, these overrides take priority over
+                ordinary tracker and global settings. Tracker-specific group
+                overrides take priority over global group overrides.
+              </p>
+              <p className="ua-config-service-description text-xs leading-relaxed">
+                Names are matched without case or leading hyphens. Tick a field
+                to enable its override. Disabled fields inherit their usual
+                text; an enabled field left empty uses blank text.
+              </p>
+              {pathParts[0] !== "TRACKERS" && (
+                <p className="ua-config-service-description text-xs leading-relaxed">
+                  Inherited text varies by tracker. New overrides start with
+                  DEFAULT text; tracker-specific release-group overrides still
+                  take priority.
+                </p>
+              )}
+              {groupNames.length === 0 && (
+                <p className="ua-config-service-description text-sm">
+                  No release group overrides configured.
+                </p>
+              )}
+              {groupNames.map((name) => {
+                const values = groups[name];
+                const isGroupOpen = openNames.has(name);
+                const activeCount = Object.values(values).filter(
+                  (value) => value !== null,
+                ).length;
+                const additionalKeys = Object.keys(values).filter(
+                  (key) => !fields.some((field) => field.key === key),
+                );
+                return (
+                  <div
+                    key={name}
+                    className="ua-config-accordion overflow-hidden rounded-lg border"
+                    data-open={isGroupOpen ? "true" : "false"}
                   >
-                    <svg
-                      width="18"
-                      height="18"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="m9 18 6-6-6-6"></path>
-                    </svg>
-                  </span>
-                </button>
-                {isReleaseGroupOpen && (
-                  <div className="ua-config-accordion-panel border-t p-4">
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-                      {fields.map((field) => (
-                        <ConfigLeaf
-                          key={`${releaseGroupKey}/${field.key}`}
-                          item={field}
-                          pathParts={[...pathParts, item.key, releaseGroup.key]}
-                          depth={depth + 2}
-                          isDarkMode={isDarkMode}
-                          fullWidth={true}
-                          allImageHosts={allImageHosts}
-                          usedImageHosts={usedImageHosts}
-                          torrentClients={torrentClients}
-                          onValueChange={onValueChange}
-                        />
-                      ))}
+                    <div className="ua-config-accordion-trigger flex flex-wrap items-center gap-2 px-3 py-2">
+                      <button
+                        type="button"
+                        aria-expanded={isGroupOpen}
+                        aria-label={`Edit overrides for ${name}`}
+                        className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
+                        onClick={() =>
+                          setOpenNames((current) => {
+                            const next = new Set(current);
+                            if (next.has(name)) next.delete(name);
+                            else next.add(name);
+                            return next;
+                          })
+                        }
+                      >
+                        <svg
+                          className="ua-config-accordion-chevron shrink-0 transition-transform"
+                          style={{
+                            transform: isGroupOpen
+                              ? "rotate(90deg)"
+                              : "rotate(0deg)",
+                          }}
+                          width="18"
+                          height="18"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="m9 18 6-6-6-6" />
+                        </svg>
+                        <span className="min-w-0">
+                          <span className="block break-words text-sm font-semibold">
+                            {name}
+                          </span>
+                          <span className="ua-config-service-description block text-xs">
+                            {activeCount}{" "}
+                            {activeCount === 1 ? "override" : "overrides"}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Rename group ${name}`}
+                        className="ua-config-service-action rounded-md border px-2.5 py-1.5 text-xs font-semibold"
+                        onClick={() => {
+                          setRenameTarget(name);
+                          setRenameName(name);
+                          setError("");
+                        }}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove group ${name}`}
+                        className="rounded-md border border-red-500/40 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-500/10"
+                        onClick={() => {
+                          draftCache.current.get(pathKey)?.delete(name);
+                          updateGroups(
+                            Object.fromEntries(
+                              Object.entries(groups).filter(
+                                ([key]) => key !== name,
+                              ),
+                            ),
+                          );
+                          if (renameTarget === name) setRenameTarget(null);
+                          setError("");
+                        }}
+                      >
+                        Remove
+                      </button>
                     </div>
+                    {renameTarget === name && (
+                      <form
+                        className="flex flex-wrap items-end gap-2 border-t p-3"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          renameGroup();
+                        }}
+                      >
+                        <label className="w-full text-xs font-medium sm:min-w-0 sm:flex-1">
+                          New name for {name}
+                          <input
+                            value={renameName}
+                            onChange={(event) =>
+                              setRenameName(event.target.value)
+                            }
+                            className="ua-config-input mt-1 w-full rounded-md border px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <button
+                          type="submit"
+                          className="ua-config-service-action rounded-md border px-3 py-2 text-xs font-semibold"
+                        >
+                          Apply name
+                        </button>
+                        <button
+                          type="button"
+                          className="ua-config-service-action rounded-md border px-3 py-2 text-xs"
+                          onClick={() => {
+                            setRenameTarget(null);
+                            setError("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        {error && (
+                          <p
+                            role="alert"
+                            className="w-full text-sm text-red-500"
+                          >
+                            {error}
+                          </p>
+                        )}
+                      </form>
+                    )}
+                    {isGroupOpen && (
+                      <div className="ua-config-accordion-panel space-y-3 border-t p-4">
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+                          {fields.map((field) => {
+                            const label = formatConfigFieldLabel(
+                              field.key,
+                              path,
+                            );
+                            const enabled =
+                              Object.hasOwn(values, field.key) &&
+                              values[field.key] !== null;
+                            const textId = `${fieldPrefix}--${encodeURIComponent(name)}--${field.key}`;
+                            const inherited = inheritedField(name, field.key);
+                            return (
+                              <div
+                                key={field.key}
+                                className="flex min-w-0 flex-col gap-2"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <label className="flex min-w-0 cursor-pointer items-center gap-2 text-sm font-medium">
+                                    <input
+                                      type="checkbox"
+                                      checked={enabled}
+                                      aria-label={`Override ${label} for ${name}`}
+                                      className="ua-theme-checkbox h-4 w-4 shrink-0"
+                                      onChange={(event) =>
+                                        setFieldEnabled(
+                                          name,
+                                          field.key,
+                                          event.target.checked,
+                                        )
+                                      }
+                                    />
+                                    <span>{label}</span>
+                                  </label>
+                                  {field.help?.length > 0 && (
+                                    <Tooltip content={field.help.join("\n")}>
+                                      <InfoIcon className="ua-config-service-description h-4 w-4 shrink-0" />
+                                    </Tooltip>
+                                  )}
+                                </div>
+                                <input
+                                  id={textId}
+                                  type="text"
+                                  aria-label={`${label} for ${name}`}
+                                  aria-describedby={`${textId}--source`}
+                                  disabled={!enabled}
+                                  value={
+                                    enabled
+                                      ? values[field.key]
+                                      : inherited.preview
+                                  }
+                                  placeholder={
+                                    enabled ? "" : inherited.placeholder
+                                  }
+                                  className="ua-config-input mt-auto w-full rounded-md border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                                  onChange={(event) =>
+                                    updateGroups({
+                                      ...groups,
+                                      [name]: {
+                                        ...values,
+                                        [field.key]: event.target.value,
+                                      },
+                                    })
+                                  }
+                                />
+                                <span
+                                  id={`${textId}--source`}
+                                  className="ua-config-service-description text-xs"
+                                >
+                                  {enabled
+                                    ? inherited.overrideLabel
+                                    : inherited.inheritedLabel}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {additionalKeys.length > 0 && (
+                          <p className="ua-config-service-description text-xs">
+                            Additional existing fields are preserved:{" "}
+                            {additionalKeys.join(", ")}.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+              <form
+                className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  addGroup();
+                }}
+              >
+                <label className="min-w-0 flex-1 text-sm font-medium">
+                  Release group name
+                  <input
+                    value={newName}
+                    onChange={(event) => setNewName(event.target.value)}
+                    placeholder="e.g. MyGroup"
+                    className="ua-config-input mt-1 w-full rounded-md border px-3 py-2"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="ua-config-service-action rounded-md border px-3 py-2 text-sm font-semibold"
+                >
+                  Add group
+                </button>
+              </form>
+              {error && renameTarget === null && (
+                <p role="alert" className="text-sm text-red-500">
+                  {error}
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
     </section>
@@ -4915,6 +5302,382 @@ function TorrentClientSettings({
   );
 }
 
+function ApiKeyExpiryStatus({
+  tracker,
+  apiKey,
+  isDraft,
+  expiry,
+  onStatus,
+  renderField,
+}) {
+  window.UAApiKeyExpiry.useClock();
+  const [feedback, setFeedback] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const requestRef = useRef(null);
+  useEffect(() => {
+    setFeedback(null);
+    setChecking(false);
+    return () => requestRef.current?.abort();
+  }, [apiKey, isDraft]);
+
+  const check = async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setChecking(true);
+    setFeedback(null);
+    try {
+      const response = await apiFetch(`${API_BASE}/tracker_api_key_status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          tracker: tracker.name,
+          api_key: apiKey,
+          refresh: true,
+        }),
+      });
+      const data = await response.json();
+      if (controller.signal.aborted) return;
+      if (!response.ok || !data.success)
+        throw new Error(data.error || "API key check failed.");
+      onStatus(data.expiry);
+      setFeedback({ message: data.message, error: false });
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setFeedback({
+          message: error.message || "API key check failed.",
+          error: true,
+        });
+    } finally {
+      if (!controller.signal.aborted) setChecking(false);
+    }
+  };
+  const state = apiKeyExpiryState(expiry);
+  const tone =
+    state === "expired"
+      ? "text-red-500"
+      : state === "expiring"
+        ? "text-amber-500"
+        : "ua-config-service-description";
+  const details = [
+    apiKeyExpiryLabel(expiry),
+    expiry?.checked_at &&
+      `Last checked ${new Date(expiry.checked_at).toLocaleString()}`,
+    feedback?.message,
+    isDraft &&
+      "Checking uses your draft key. Save Config to use it for uploads.",
+    !apiKey &&
+      "Checks the key supplied by your saved Prowlarr connection, if available.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <div className="space-y-2">
+      {renderField(
+        <button
+          type="button"
+          className="ua-config-service-action flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold disabled:opacity-50"
+          disabled={checking}
+          aria-label={checking ? "Checking API key" : "Check API key"}
+          title={
+            isDraft
+              ? "Check draft API key"
+              : !apiKey
+                ? "Check Prowlarr API key"
+                : "Check API key"
+          }
+          onClick={check}
+        >
+          {checking && (
+            <svg
+              className="h-3 w-3 animate-spin"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+                stroke="currentColor"
+                strokeWidth="3"
+                opacity="0.3"
+              />
+              <path
+                d="M12 3a9 9 0 0 1 9 9"
+                stroke="currentColor"
+                strokeWidth="3"
+              />
+            </svg>
+          )}
+          {checking ? "Checking…" : "Check"}
+        </button>,
+        <div
+          className={`ml-auto min-w-0 max-w-full text-xs ${tone}`}
+          role="status"
+          aria-label="API key status"
+        >
+          <Tooltip content={details}>
+            <span
+              tabIndex={0}
+              aria-label={details}
+              className="border-b border-dotted border-current"
+            >
+              {isDraft && "Draft · "}
+              {feedback && !feedback.error && "✓ Accepted · "}
+              {apiKeyExpiryLabel(expiry, true)}
+            </span>
+          </Tooltip>
+        </div>,
+      )}
+      {feedback?.error && (
+        <p className="text-xs text-red-500" role="alert">
+          {feedback.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TrackerDefaultOverrides({
+  items,
+  pathParts,
+  isDarkMode,
+  pendingChanges,
+  onValueChange,
+}) {
+  const drafts = React.useContext(OverrideDraftContext);
+  const defaults = React.useContext(TrackerDefaultValuesContext);
+  const [isOpen, setIsOpen] = useState(false);
+  const fieldState = (item) => {
+    const path = [...pathParts, item.key];
+    const pathKey = path.join("/");
+    const pending = pendingChanges?.get(pathKey);
+    const stored = item.source === "config";
+    return {
+      path,
+      pathKey,
+      stored,
+      enabled: pending ? !pending.removeKey : stored,
+      value: pending && !pending.removeKey ? pending.value : item.value,
+      inherited: defaults[item.key] ?? item.example_value ?? "",
+    };
+  };
+  const activeCount = items.filter((item) => fieldState(item).enabled).length;
+  const groups = [
+    {
+      title: "Images & Screenshots",
+      keys: [
+        "add_logo",
+        "logo_size",
+        "thumbnail_size",
+        "screens_per_row",
+        "multiScreens",
+        "pack_thumb_size",
+        "add_bluray_link",
+        "use_bluray_images",
+        "bluray_image_size",
+        "add_audio_spectrogram",
+        "add_dynamic_hdr_plot",
+      ],
+    },
+    {
+      title: "Description Text",
+      keys: [
+        "episode_overview",
+        "custom_description_header",
+        "screenshot_header",
+        "disc_menu_header",
+        "audio_spectrogram_header",
+        "dynamic_hdr_plot_header",
+        "tonemapped_header",
+        "custom_signature",
+        "custom_header",
+        "custom_footer",
+        "mediainfo_header",
+        "user_description",
+      ],
+    },
+    {
+      title: "Limits & Injection",
+      keys: ["charLimit", "fileLimit", "processLimit", "inject_delay"],
+    },
+  ];
+  const itemByKey = new Map(items.map((item) => [item.key, item]));
+  const updateField = (item, value, removeKey = false) => {
+    const state = fieldState(item);
+    onValueChange(state.path, value, {
+      originalValue: state.stored ? item.value : undefined,
+      removeKey,
+      isSensitive: false,
+      isRedacted: false,
+      readOnly: false,
+    });
+  };
+  const coerceFieldValue = (item, value) => {
+    const valueType = typeof (item.example_value ?? item.value);
+    return valueType === "boolean"
+      ? value === true || value === "true" || value === "True"
+      : valueType === "number"
+        ? Number(value)
+        : value;
+  };
+  const setFieldEnabled = (item, enabled) => {
+    const state = fieldState(item);
+    if (state.enabled === enabled) return;
+    if (enabled) {
+      updateField(
+        item,
+        coerceFieldValue(
+          item,
+          drafts.current.get(state.pathKey) ?? state.inherited,
+        ),
+      );
+    } else {
+      drafts.current.set(state.pathKey, state.value);
+      updateField(item, state.stored ? item.value : undefined, state.stored);
+    }
+  };
+
+  return (
+    <section
+      className="ua-config-accordion overflow-hidden rounded-xl border"
+      data-open={isOpen ? "true" : "false"}
+    >
+      <button
+        type="button"
+        onClick={() => setIsOpen((open) => !open)}
+        className="ua-config-accordion-trigger flex w-full items-center justify-between gap-4 px-4 py-3 text-left"
+        aria-expanded={isOpen}
+      >
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold">
+            Tracker-Specific DEFAULT Overrides
+          </span>
+          <span className="ua-config-service-description mt-1 block text-xs font-normal">
+            {activeCount > 0
+              ? `${activeCount} ${activeCount === 1 ? "field overrides" : "fields override"} DEFAULT. All others inherit.`
+              : "All fields inherit DEFAULT settings."}
+          </span>
+        </span>
+        <span className="ua-config-service-action shrink-0 text-xs font-medium">
+          {isOpen ? "Hide" : "Show"}
+        </span>
+      </button>
+      {isOpen && (
+        <div className="ua-config-accordion-panel space-y-5 border-t p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <p className="ua-config-service-description min-w-0 flex-1 text-xs leading-relaxed">
+              Tick a field to override DEFAULT for this tracker. Untick it to
+              restore inheritance when you save. Matching release group
+              overrides still take priority for description text.
+            </p>
+            <div className="flex shrink-0 items-center justify-end gap-2">
+              <button
+                type="button"
+                className="ua-config-service-action rounded-md border px-2.5 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label={`Enable all DEFAULT overrides for ${pathParts[1]}`}
+                disabled={activeCount === items.length}
+                onClick={() =>
+                  items.forEach((item) => setFieldEnabled(item, true))
+                }
+              >
+                Enable all
+              </button>
+              <button
+                type="button"
+                className="ua-config-service-action rounded-md border px-2.5 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label={`Disable all DEFAULT overrides for ${pathParts[1]}`}
+                disabled={activeCount === 0}
+                onClick={() =>
+                  items.forEach((item) => setFieldEnabled(item, false))
+                }
+              >
+                Disable all
+              </button>
+            </div>
+          </div>
+          {groups.map((group) => {
+            const groupItems = group.keys
+              .map((key) => itemByKey.get(key))
+              .filter(Boolean);
+            if (!groupItems.length) return null;
+            return (
+              <section key={group.title} className="space-y-3">
+                <h4 className="ua-config-section-heading border-b py-1 text-xs font-semibold">
+                  {group.title}
+                </h4>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+                  {groupItems.map((item) => {
+                    const state = fieldState(item);
+                    const label = formatConfigFieldLabel(item.key, pathParts);
+                    const helpText = getConfigHelpText(item, pathParts);
+                    const displayValue = state.enabled
+                      ? state.value
+                      : state.inherited;
+                    // Pending numeric edits arrive as strings from ConfigLeaf.
+                    // Retain the field type so booleans keep their toggle control.
+                    const coerceValue = (value) =>
+                      coerceFieldValue(item, value);
+                    return (
+                      <div
+                        key={item.key}
+                        className="flex min-w-0 flex-col gap-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <label className="flex min-w-0 cursor-pointer items-center gap-2 text-sm font-medium">
+                            <input
+                              type="checkbox"
+                              checked={state.enabled}
+                              aria-label={`Override ${label} for ${pathParts[1]}`}
+                              className="ua-theme-checkbox h-4 w-4 shrink-0"
+                              onChange={(event) =>
+                                setFieldEnabled(item, event.target.checked)
+                              }
+                            />
+                            <span>{label}</span>
+                          </label>
+                          {helpText && (
+                            <Tooltip content={helpText}>
+                              <InfoIcon className="ua-config-service-description h-4 w-4 shrink-0" />
+                            </Tooltip>
+                          )}
+                        </div>
+                        <fieldset
+                          disabled={!state.enabled}
+                          className={`min-w-0 ${state.enabled ? "" : "opacity-50"}`}
+                        >
+                          <ConfigLeaf
+                            item={{ ...item, value: coerceValue(displayValue) }}
+                            pathParts={pathParts}
+                            isDarkMode={isDarkMode}
+                            fullWidth={true}
+                            hideLabel={true}
+                            hideHelp={true}
+                            onValueChange={(_path, value) =>
+                              updateField(item, coerceValue(value))
+                            }
+                          />
+                        </fieldset>
+                        <span className="ua-config-service-description text-xs">
+                          {state.enabled
+                            ? "Overrides DEFAULT"
+                            : "Inherits DEFAULT"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function TrackerSettings({
   items,
   pathParts,
@@ -4922,11 +5685,18 @@ function TrackerSettings({
   allImageHosts,
   usedImageHosts,
   torrentClients,
-  overridesEnabled = false,
-  onToggleOverrides = () => {},
+  pendingChanges,
+  tracker,
+  apiKeyExpiry,
+  onApiKeyStatus,
   onValueChange,
 }) {
-  const editableItems = items || [];
+  const releaseGroupOverrides = (items || []).find(
+    (item) => item.key === "tag_overrides",
+  );
+  const editableItems = (items || []).filter(
+    (item) => item.key !== "tag_overrides",
+  );
   const itemByKey = new Map(editableItems.map((item) => [item.key, item]));
   const overrideItems = editableItems.filter((item) =>
     trackerDefaultOverrideKeys.has(item.key),
@@ -5045,21 +5815,49 @@ function TrackerSettings({
             <h3 className="text-sm font-semibold">{group.title}</h3>
           </div>
           <div className="p-4">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {group.items.map((item) => (
-                <ConfigLeaf
-                  key={item.key}
-                  item={item}
-                  pathParts={pathParts}
-                  isDarkMode={isDarkMode}
-                  fullWidth={true}
-                  hideHelp={TRACKER_HELP_NOTE_KEYS.has(item.key)}
-                  allImageHosts={allImageHosts}
-                  usedImageHosts={usedImageHosts}
-                  torrentClients={torrentClients}
-                  onValueChange={onValueChange}
-                />
-              ))}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+              {group.items.map((item) => {
+                const renderField = (inputAction, labelStatus) => (
+                  <ConfigLeaf
+                    item={item}
+                    pathParts={pathParts}
+                    isDarkMode={isDarkMode}
+                    fullWidth={true}
+                    hideHelp={TRACKER_HELP_NOTE_KEYS.has(item.key)}
+                    allImageHosts={allImageHosts}
+                    usedImageHosts={usedImageHosts}
+                    torrentClients={torrentClients}
+                    onValueChange={onValueChange}
+                    inputAction={inputAction}
+                    labelStatus={labelStatus}
+                  />
+                );
+                return (
+                  <div key={item.key} className="min-w-0">
+                    {item.key === "api_key" &&
+                    tracker?.api_key_expiry_supported ? (
+                      <ApiKeyExpiryStatus
+                        renderField={renderField}
+                        tracker={tracker}
+                        apiKey={String(
+                          pendingChanges?.get(
+                            [...pathParts, "api_key"].join("/"),
+                          )?.value ??
+                            item.value ??
+                            "",
+                        ).trim()}
+                        isDraft={pendingChanges?.has(
+                          [...pathParts, "api_key"].join("/"),
+                        )}
+                        expiry={apiKeyExpiry}
+                        onStatus={onApiKeyStatus}
+                      />
+                    ) : (
+                      renderField()
+                    )}
+                  </div>
+                );
+              })}
             </div>
             {group.items
               .filter((item) => TRACKER_HELP_NOTE_KEYS.has(item.key))
@@ -5083,66 +5881,27 @@ function TrackerSettings({
         </section>
       ))}
       {overrideItems.length > 0 && (
-        <section className="ua-config-client-settings-group overflow-hidden rounded-lg border">
-          <div className="ua-config-section-heading flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="text-sm font-semibold">
-                Tracker-Specific DEFAULT Overrides
-              </h3>
-              <p className="ua-config-service-description mt-1 text-xs">
-                Enable only when this tracker should use different description,
-                screenshot, or injection settings from DEFAULT.
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-3">
-              <button
-                type="button"
-                onClick={() =>
-                  onToggleOverrides(!overridesEnabled, overrideItems)
-                }
-                aria-pressed={overridesEnabled}
-                aria-label={`Tracker-specific overrides: ${overridesEnabled ? "Enabled" : "Disabled"}`}
-                className="ua-config-boolean-toggle relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
-                data-enabled={overridesEnabled ? "true" : "false"}
-              >
-                <span
-                  className={`ua-config-boolean-knob inline-block h-4 w-4 transform rounded-full transition-transform ${overridesEnabled ? "translate-x-6" : "translate-x-1"}`}
-                />
-              </button>
-              <span className="text-sm font-medium">
-                {overridesEnabled ? "Enabled" : "Disabled"}
-              </span>
-            </div>
-          </div>
-          {overridesEnabled ? (
-            <div>
-              <div className="ua-config-state-panel m-4 rounded-lg border p-4 text-sm">
-                These values will override the matching DEFAULT settings for
-                this tracker. Disable this section to remove them and restore
-                DEFAULT inheritance.
-              </div>
-              <div className="grid grid-cols-1 gap-4 border-t p-4 md:grid-cols-2 xl:grid-cols-3">
-                {overrideItems.map((item) => (
-                  <ConfigLeaf
-                    key={item.key}
-                    item={item}
-                    pathParts={pathParts}
-                    isDarkMode={isDarkMode}
-                    fullWidth={true}
-                    allImageHosts={allImageHosts}
-                    usedImageHosts={usedImageHosts}
-                    torrentClients={torrentClients}
-                    onValueChange={onValueChange}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="ua-config-state-panel m-4 rounded-lg border p-4 text-sm">
-              This tracker currently inherits the matching DEFAULT settings.
-            </div>
-          )}
-        </section>
+        <TrackerDefaultOverrides
+          items={overrideItems}
+          pathParts={pathParts}
+          isDarkMode={isDarkMode}
+          pendingChanges={pendingChanges}
+          onValueChange={onValueChange}
+        />
+      )}
+      {releaseGroupOverrides && (
+        <ReleaseGroupOverrides
+          item={releaseGroupOverrides}
+          pathParts={pathParts}
+          trackerItems={editableItems}
+          pendingChanges={pendingChanges}
+          pendingValue={
+            pendingChanges?.get(
+              [...pathParts, releaseGroupOverrides.key].join("/"),
+            )?.value
+          }
+          onValueChange={onValueChange}
+        />
       )}
     </div>
   );
@@ -5254,14 +6013,13 @@ function DescriptionImagesSection({
 }
 
 function TrackerManager({
+  requestedTracker,
+  onSavedApiKeyStatus,
   items,
   defaultTrackersItem,
   trackerView,
   trackerCatalog,
   pendingChanges = new Map(),
-  pendingTrackerOverrideModes = new Map(),
-  trackerOverrideEditors = new Set(),
-  onToggleTrackerOverrides = () => {},
   pathParts,
   isDarkMode,
   allImageHosts,
@@ -5314,6 +6072,60 @@ function TrackerManager({
     useState(new Set());
   const [refreshingSetupTracker, setRefreshingSetupTracker] = useState("");
   const [setupRefreshFeedback, setSetupRefreshFeedback] = useState(null);
+  const [apiKeyChecks, setApiKeyChecks] = useState({});
+  useEffect(() => setApiKeyChecks({}), [trackerCatalog]);
+  const focusedRequest = useRef(null);
+  useEffect(() => {
+    if (!requestedTracker) return;
+    setTrackerQuery("");
+    setDestinationFilter("all");
+    setCategoryFilter("all");
+  }, [requestedTracker]);
+  useEffect(() => {
+    if (!requestedTracker || focusedRequest.current === requestedTracker)
+      return;
+    const frame = window.requestAnimationFrame(() => {
+      const card = document.getElementById(
+        `tracker-settings-${requestedTracker.name}`,
+      );
+      if (!card) return;
+      const field = document.getElementById(
+        `TRACKERS--${requestedTracker.name}--api_key`,
+      );
+      (field || card).scrollIntoView({ block: "center" });
+      // Focusing the field itself would reveal/clear its redacted placeholder.
+      (field?.nextElementSibling || card.querySelector("button"))?.focus({
+        preventScroll: true,
+      });
+      focusedRequest.current = requestedTracker;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    requestedTracker,
+    trackerView,
+    trackerCatalog,
+    expandedGroups,
+    trackerQuery,
+    destinationFilter,
+    categoryFilter,
+  ]);
+
+  const trackerApiKey = (tracker) => {
+    const name = String(tracker.name).toUpperCase();
+    const saved = trackerItemByName
+      .get(name)
+      ?.children?.find((item) => item.key === "api_key")?.value;
+    return String(
+      pendingTrackerValues.get(name)?.get("api_key") ?? saved ?? "",
+    ).trim();
+  };
+  const trackerExpiry = (tracker) => {
+    const name = String(tracker.name).toUpperCase();
+    const check = apiKeyChecks[name];
+    if (check?.apiKey === trackerApiKey(tracker)) return check.expiry;
+    if (pendingTrackerValues.get(name)?.has("api_key")) return null;
+    return tracker.api_key_expiry;
+  };
 
   useEffect(() => {
     setSelectedDefaults(normalizeTrackers(defaultTrackersItem.value));
@@ -5513,6 +6325,22 @@ function TrackerManager({
     const trackerStatusText = window.getUATrackerStatusText
       ? window.getUATrackerStatusText(trackerStatus)
       : "Not checked";
+    const visibleStatuses =
+      tracker.credential_source === "prowlarr" &&
+      !statuses.some((status) => status.label === "Prowlarr")
+        ? [...statuses, { label: "Prowlarr", tone: "accent" }]
+        : [...statuses];
+    const expiry = trackerExpiry(tracker);
+    const expiryState = apiKeyExpiryState(expiry);
+    if (expiryState === "expired" || expiryState === "expiring") {
+      visibleStatuses.push({
+        label:
+          expiryState === "expired"
+            ? "API key expired"
+            : "API key expires soon",
+        tone: expiryState === "expired" ? "danger" : "warning",
+      });
+    }
     return (
       <span className="flex min-w-0 items-center gap-3">
         <span className="ua-config-tracker-icon flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border">
@@ -5544,9 +6372,9 @@ function TrackerManager({
                 title={trackerStatusText}
               />
             )}
-            {statuses.length > 0 && (
+            {visibleStatuses.length > 0 && (
               <span className="flex flex-wrap gap-1.5">
-                {statuses.map((status) =>
+                {visibleStatuses.map((status) =>
                   trackerStatusBadge(status.label, status.tone),
                 )}
               </span>
@@ -6008,10 +6836,7 @@ function TrackerManager({
         const isDefault = selectedDefaults.includes(name);
         const isDefaultPending = isDefault !== originalDefaultSet.has(name);
         const isRemoving = trackerItem?.source === "removing";
-        const isUnsaved =
-          pendingTrackerValues.has(name) ||
-          pendingTrackerOverrideModes.has(name) ||
-          isDefaultPending;
+        const isUnsaved = pendingTrackerValues.has(name) || isDefaultPending;
         const statuses = [];
         if (isDefault) statuses.push({ label: "Default", tone: "accent" });
         if (isRemoving) {
@@ -6023,16 +6848,10 @@ function TrackerManager({
         const hasCookieRequirement = setupState.requirements.some(
           (requirement) => requirement.id === "cookie",
         );
-        const hasStoredOverrides = (trackerItem?.children || []).some(
-          (item) =>
-            trackerDefaultOverrideKeys.has(item.key) &&
-            item.source === "config",
-        );
-        const overridesEnabled =
-          hasStoredOverrides || trackerOverrideEditors.has(name);
         return (
           <section
             key={name}
+            id={`tracker-settings-${name}`}
             className="ua-config-accordion overflow-hidden rounded-xl border"
             data-open={isOpen ? "true" : "false"}
             data-removing={isRemoving ? "true" : "false"}
@@ -6097,9 +6916,22 @@ function TrackerManager({
             </div>
             {isOpen && (
               <div className="ua-config-accordion-panel border-t p-4">
-                <p className="ua-config-service-description mb-4 text-xs">
-                  Tracker code: <code className="font-semibold">{name}</code>
-                </p>
+                <div className="ua-config-service-description mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                  <span>
+                    Tracker code: <code className="font-semibold">{name}</code>
+                  </span>
+                  {tracker.codebase && (
+                    <span className="inline-flex items-center gap-2">
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        Codebase:{" "}
+                        <span className="font-semibold">
+                          {tracker.codebase}
+                        </span>
+                      </span>
+                    </span>
+                  )}
+                </div>
                 {trackerView === "available" && (
                   <div className="ua-config-state-panel mb-4 rounded-lg border p-4 text-sm">
                     Enter the required authentication details and choose Save
@@ -6207,10 +7039,18 @@ function TrackerManager({
                     allImageHosts={allImageHosts}
                     usedImageHosts={usedImageHosts}
                     torrentClients={torrentClients}
-                    overridesEnabled={overridesEnabled}
-                    onToggleOverrides={(enabled, overrideItems) =>
-                      onToggleTrackerOverrides(name, enabled, overrideItems)
-                    }
+                    pendingChanges={pendingChanges}
+                    tracker={tracker}
+                    apiKeyExpiry={trackerExpiry(tracker)}
+                    onApiKeyStatus={(expiry) => {
+                      setApiKeyChecks((current) => ({
+                        ...current,
+                        [name]: { apiKey: trackerApiKey(tracker), expiry },
+                      }));
+                      if (!pendingTrackerValues.get(name)?.has("api_key")) {
+                        onSavedApiKeyStatus?.(name, expiry);
+                      }
+                    }}
                     onValueChange={onValueChange}
                   />
                 ) : (
@@ -6587,6 +7427,8 @@ function ArrIntegrationSettings({
 }
 
 function ItemList({
+  requestedTracker,
+  onSavedApiKeyStatus,
   items,
   pathParts,
   depth,
@@ -6601,9 +7443,6 @@ function ItemList({
   trackerView,
   trackerCatalog,
   pendingChanges,
-  pendingTrackerOverrideModes,
-  trackerOverrideEditors,
-  onToggleTrackerOverrides,
   onAddTorrentClient,
   onRemovePendingTorrentClient,
   onRenameTorrentClient,
@@ -6618,6 +7457,8 @@ function ItemList({
   externalToolStatusError,
   isCheckingExternalTools,
   onCheckExternalTools,
+  onTestProwlarr,
+  prowlarrTestState,
   onBrowseFolder,
   onValueChange,
 }) {
@@ -6661,12 +7502,13 @@ function ItemList({
   if (isTrackerConfig && defaultTrackersItem) {
     return (
       <TrackerManager
+        requestedTracker={requestedTracker}
+        onSavedApiKeyStatus={onSavedApiKeyStatus}
         items={subsections}
         defaultTrackersItem={defaultTrackersItem}
         trackerView={trackerView || "default"}
         trackerCatalog={trackerCatalog}
         pendingChanges={pendingChanges}
-        pendingTrackerOverrideModes={pendingTrackerOverrideModes}
         pathParts={pathParts}
         isDarkMode={isDarkMode}
         allImageHosts={allImageHosts}
@@ -6674,8 +7516,6 @@ function ItemList({
         expandedGroups={expandedGroups}
         toggleGroup={toggleGroup}
         torrentClients={torrentClients}
-        trackerOverrideEditors={trackerOverrideEditors}
-        onToggleTrackerOverrides={onToggleTrackerOverrides}
         onRemoveTracker={onRemoveTracker}
         onUndoRemoveTracker={onUndoRemoveTracker}
         onRefreshTrackerCatalog={onRefreshTrackerCatalog}
@@ -7055,6 +7895,11 @@ function ItemList({
           depth === 0 &&
           item.subsection === true &&
           normalizeConfigHeading(item.key) === "EXTERNAL TOOL PATHS";
+        const isProwlarrSubsection =
+          pathParts[0] === "DEFAULT" &&
+          depth === 0 &&
+          item.subsection === true &&
+          normalizeConfigHeading(item.key) === "PROWLARR CREDENTIAL FALLBACK";
         const isImageHostingSubsection =
           pathParts[0] === "DEFAULT" &&
           depth === 0 &&
@@ -7262,13 +8107,11 @@ function ItemList({
                 <ReleaseGroupOverrides
                   item={releaseGroupOverrides}
                   pathParts={pathParts}
-                  depth={depth}
-                  isDarkMode={isDarkMode}
-                  allImageHosts={allImageHosts}
-                  usedImageHosts={usedImageHosts}
-                  expandedGroups={expandedGroups}
-                  toggleGroup={toggleGroup}
-                  torrentClients={torrentClients}
+                  pendingValue={
+                    pendingChanges?.get(
+                      [...pathParts, releaseGroupOverrides.key].join("/"),
+                    )?.value
+                  }
                   onValueChange={onValueChange}
                 />
               )}
@@ -7346,6 +8189,18 @@ function ItemList({
                       {isCheckingExternalTools ? "Checking…" : "Check tools"}
                     </button>
                   )}
+                  {isProwlarrSubsection && (
+                    <button
+                      type="button"
+                      className="ua-config-service-action shrink-0 rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={prowlarrTestState?.status === "loading"}
+                      onClick={onTestProwlarr}
+                    >
+                      {prowlarrTestState?.status === "loading"
+                        ? "Testing…"
+                        : "Test Connection"}
+                    </button>
+                  )}
                 </div>
                 {isExternalToolsSubsection && externalToolStatusError && (
                   <div
@@ -7376,6 +8231,19 @@ function ItemList({
                       </span>
                     </div>
                   )}
+                {isProwlarrSubsection && prowlarrTestState?.message && (
+                  <div
+                    className={
+                      "mt-3 rounded-lg border px-3 py-2 text-xs " +
+                      (prowlarrTestState.status === "success"
+                        ? "border-green-500/40 text-green-500"
+                        : "border-red-500/40 text-red-500")
+                    }
+                    role="status"
+                  >
+                    {prowlarrTestState.message}
+                  </div>
+                )}
               </div>
               <div className="ua-config-section-panel p-4">{nested}</div>
             </section>
@@ -8669,6 +9537,8 @@ function AccessLogTab({ isDarkMode }) {
 }
 
 function ConfigSidebar({
+  trackers,
+  onOpenTracker,
   isMobileLayout,
   sections,
   activeTab,
@@ -8972,6 +9842,12 @@ function ConfigSidebar({
         )}
 
         <div className="mt-3 grid gap-2">
+          <window.UAApiKeyAlerts
+            trackers={trackers}
+            appBase={APP_BASE}
+            onOpenTracker={onOpenTracker}
+            placement="sidebar"
+          />
           <button
             type="button"
             className={`ua-config-sidebar-action rounded-lg px-3 py-2 text-sm font-semibold ${updateStatus?.update_available ? "ua-update-sidebar-action" : ""}`}
@@ -9053,17 +9929,22 @@ function ConfigApp() {
   );
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [pendingChanges, setPendingChanges] = useState(new Map());
+  const overrideDrafts = useRef(new Map());
+
+  useEffect(() => {
+    const resetDrafts = (event) => {
+      overrideDrafts.current.delete(String(event.detail?.pathKey || ""));
+    };
+    window.addEventListener(CONFIG_FIELD_RESET_EVENT, resetDrafts);
+    return () =>
+      window.removeEventListener(CONFIG_FIELD_RESET_EVENT, resetDrafts);
+  }, []);
   const [pendingTorrentClients, setPendingTorrentClients] = useState(new Map());
   const [pendingRemovedTorrentClients, setPendingRemovedTorrentClients] =
     useState(new Set());
   const [pendingRenamedTorrentClients, setPendingRenamedTorrentClients] =
     useState(new Map());
   const [pendingRemovedTrackers, setPendingRemovedTrackers] = useState(
-    new Set(),
-  );
-  const [pendingTrackerOverrideModes, setPendingTrackerOverrideModes] =
-    useState(new Map());
-  const [trackerOverrideEditors, setTrackerOverrideEditors] = useState(
     new Set(),
   );
   const [isSaving, setIsSaving] = useState(false);
@@ -9101,10 +9982,15 @@ function ConfigApp() {
     defaultTrackers: [],
     trackers: [],
   });
+  const [requestedTracker, setRequestedTracker] = useState(null);
+  const trackerDeepLink = useRef(
+    new URLSearchParams(window.location.search).get("tracker"),
+  );
   const folderPickerResolveRef = useRef(null);
   const [folderPicker, setFolderPicker] = useState(null);
   const [renameClientSource, setRenameClientSource] = useState("");
   const [clientTestStates, setClientTestStates] = useState(new Map());
+  const [prowlarrTestState, setProwlarrTestState] = useState(null);
   const [externalToolStatuses, setExternalToolStatuses] = useState({});
   const [externalToolStatusError, setExternalToolStatusError] = useState("");
   const [isCheckingExternalTools, setIsCheckingExternalTools] = useState(false);
@@ -9262,9 +10148,30 @@ function ConfigApp() {
   };
 
   const navigateTo = (tab, subTab = "") => {
+    setRequestedTracker(null);
     setActiveTab(tab);
     setActiveSubTab(subTab);
     setIsMobileNavOpen(false);
+  };
+
+  const openTrackerSettings = (name) => {
+    const normalized = String(name).toUpperCase();
+    navigateTo("trackers", "configured");
+    setExpandedGroups(
+      (current) => new Set([...current, `TRACKERS/${normalized}`]),
+    );
+    setRequestedTracker({ name: normalized });
+  };
+
+  const updateSavedApiKeyStatus = (name, expiry) => {
+    setTrackerCatalog((current) => ({
+      ...current,
+      trackers: current.trackers.map((tracker) =>
+        tracker.name.toUpperCase() === name
+          ? { ...tracker, api_key_expiry: expiry }
+          : tracker,
+      ),
+    }));
   };
 
   useEffect(() => {
@@ -9392,6 +10299,7 @@ function ConfigApp() {
         throw new Error(data.error || "Failed to load config options");
       }
       const newSections = data.sections || [];
+      overrideDrafts.current.clear();
       const fallbackSection =
         newSections.find((section) => section.section === "DEFAULT") ||
         newSections[0];
@@ -9401,9 +10309,8 @@ function ConfigApp() {
       setPendingRemovedTorrentClients(new Set());
       setPendingRenamedTorrentClients(new Map());
       setPendingRemovedTrackers(new Set());
-      setPendingTrackerOverrideModes(new Map());
-      setTrackerOverrideEditors(new Set());
       setClientTestStates(new Map());
+      setProwlarrTestState(null);
       setRenameClientSource("");
       setConfigWarning(data.config_warning || "");
       setStatus({ text: "", type: "info" });
@@ -9507,6 +10414,21 @@ function ConfigApp() {
           }
         }
       }
+      if (trackerDeepLink.current) {
+        const name = trackerDeepLink.current.toUpperCase();
+        trackerDeepLink.current = null;
+        const trackerSection = newSections.find(
+          (section) => section.section === "TRACKERS",
+        );
+        if (
+          trackerSection?.items?.some((item) => item.key.toUpperCase() === name)
+        ) {
+          openTrackerSettings(name);
+        }
+        const url = new URL(window.location.href);
+        url.searchParams.delete("tracker");
+        window.history.replaceState(window.history.state, "", url);
+      }
       return true;
     } catch (error) {
       setStatus({
@@ -9531,8 +10453,7 @@ function ConfigApp() {
       pendingTorrentClients.size > 0 ||
       pendingRenamedTorrentClients.size > 0 ||
       pendingRemovedTorrentClients.size > 0 ||
-      pendingRemovedTrackers.size > 0 ||
-      pendingTrackerOverrideModes.size > 0;
+      pendingRemovedTrackers.size > 0;
     setIsPendingSummaryOpen(false);
 
     if (requiresStructuralReload) {
@@ -9541,6 +10462,8 @@ function ConfigApp() {
     } else {
       setPendingChanges(new Map());
     }
+
+    overrideDrafts.current.clear();
 
     fieldPathsToReset.forEach((pathKey) => {
       window.dispatchEvent(
@@ -9703,7 +10626,7 @@ function ConfigApp() {
 
   const findConfigItem = (items, targetKey) => {
     for (const item of items || []) {
-      if (item.key === targetKey && !item.children) return item;
+      if (item.key === targetKey && !item.children?.length) return item;
       const nested = findConfigItem(item.children, targetKey);
       if (nested) return nested;
     }
@@ -10123,6 +11046,43 @@ function ConfigApp() {
     }
   };
 
+  const testProwlarr = async () => {
+    const url = String(getEffectiveDefaultValue("prowlarr_url") || "").trim();
+    const apiKey = String(
+      getEffectiveDefaultValue("prowlarr_api_key") || "",
+    ).trim();
+    if (!url || !apiKey) {
+      setProwlarrTestState({
+        status: "error",
+        message: "Enter both the Prowlarr URL and API key.",
+      });
+      return;
+    }
+    setProwlarrTestState({
+      status: "loading",
+      message: "Testing connection…",
+    });
+    try {
+      const response = await apiFetch(`${API_BASE}/config_test_prowlarr`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, api_key: apiKey }),
+      });
+      const data = await response.json();
+      setProwlarrTestState({
+        status: data.success ? "success" : "error",
+        message: data.success
+          ? data.message || "Connection successful"
+          : data.error || "Connection failed",
+      });
+    } catch (error) {
+      setProwlarrTestState({
+        status: "error",
+        message: error.message || "Connection failed",
+      });
+    }
+  };
+
   const torrentClientReferences = (clientName) => {
     const normalizedName = String(clientName).trim().toLowerCase();
     const references = [];
@@ -10233,84 +11193,6 @@ function ConfigApp() {
     });
   };
 
-  const toggleTrackerOverrides = (trackerName, enabled, overrideItems) => {
-    const normalizedName = String(trackerName).toUpperCase();
-    const originalEnabled = (overrideItems || []).some(
-      (item) => item.source === "config" || item.previousSource === "config",
-    );
-
-    setTrackerOverrideEditors((currentEditors) => {
-      const next = new Set(currentEditors);
-      if (enabled) {
-        next.add(normalizedName);
-      } else {
-        next.delete(normalizedName);
-      }
-      return next;
-    });
-    setPendingTrackerOverrideModes((currentModes) => {
-      const next = new Map(currentModes);
-      if (enabled === originalEnabled) {
-        next.delete(normalizedName);
-      } else {
-        next.set(normalizedName, enabled);
-      }
-      return next;
-    });
-    setSections((currentSections) =>
-      currentSections.map((section) =>
-        section.section === "TRACKERS"
-          ? {
-              ...section,
-              items: section.items.map((trackerItem) =>
-                String(trackerItem.key).toUpperCase() === normalizedName
-                  ? {
-                      ...trackerItem,
-                      children: (trackerItem.children || []).map((item) => {
-                        if (!trackerDefaultOverrideKeys.has(item.key)) {
-                          return item;
-                        }
-                        if (enabled && item.source === "override-removing") {
-                          return {
-                            ...item,
-                            source: item.previousSource || "config",
-                            previousSource: null,
-                          };
-                        }
-                        if (!enabled && item.source === "config") {
-                          return {
-                            ...item,
-                            previousSource: item.source,
-                            source: "override-removing",
-                          };
-                        }
-                        return item;
-                      }),
-                    }
-                  : trackerItem,
-              ),
-            }
-          : section,
-      ),
-    );
-    if (!enabled) {
-      setPendingChanges((currentChanges) => {
-        const next = new Map(currentChanges);
-        for (const item of overrideItems || []) {
-          next.delete(["TRACKERS", trackerName, item.key].join("/"));
-        }
-        return next;
-      });
-    }
-    setStatusWithClear(
-      enabled
-        ? `${trackerName} will use tracker-specific overrides after you save.`
-        : `${trackerName} will inherit these settings from DEFAULT after you save.`,
-      "info",
-      3500,
-    );
-  };
-
   const removeTracker = (trackerName, wasDefault = false) => {
     const normalizedName = String(trackerName).toUpperCase();
     setSections((currentSections) =>
@@ -10335,16 +11217,6 @@ function ConfigApp() {
     setPendingRemovedTrackers((currentTrackers) => {
       const next = new Set(currentTrackers);
       next.add(normalizedName);
-      return next;
-    });
-    setPendingTrackerOverrideModes((currentModes) => {
-      const next = new Map(currentModes);
-      next.delete(normalizedName);
-      return next;
-    });
-    setTrackerOverrideEditors((currentEditors) => {
-      const next = new Set(currentEditors);
-      next.delete(normalizedName);
       return next;
     });
     setPendingChanges((currentChanges) => {
@@ -10441,8 +11313,7 @@ function ConfigApp() {
       pendingTorrentClients.size +
       pendingRenamedTorrentClients.size +
       pendingRemovedTorrentClients.size +
-      pendingRemovedTrackers.size +
-      pendingTrackerOverrideModes.size;
+      pendingRemovedTrackers.size;
     if (pendingChangeCount === 0) {
       setStatusWithClear("No changes to save.", "warn", 1500);
       return;
@@ -10565,25 +11436,6 @@ function ConfigApp() {
         const dataCreate = await respCreate.json();
         if (!dataCreate.success) {
           throw new Error(dataCreate.error || "Failed to create subsection");
-        }
-      }
-
-      // Apply group-level tracker overrides after any missing tracker block has
-      // been created, then save individual field edits over the copied values.
-      for (const [trackerName, enabled] of pendingTrackerOverrideModes) {
-        const response = await apiFetch(
-          `${API_BASE}/config_set_tracker_overrides`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tracker: trackerName, enabled }),
-          },
-        );
-        const data = await response.json();
-        if (!data.success) {
-          throw new Error(
-            data.error || "Failed to update tracker-specific overrides",
-          );
         }
       }
 
@@ -10814,8 +11666,7 @@ function ConfigApp() {
     pendingTorrentClients.size +
     pendingRenamedTorrentClients.size +
     pendingRemovedTorrentClients.size +
-    pendingRemovedTrackers.size +
-    pendingTrackerOverrideModes.size;
+    pendingRemovedTrackers.size;
   const pendingChangeSummaries = useMemo(() => {
     const summaries = [];
     const availableTrackerNames = new Set(
@@ -10830,6 +11681,48 @@ function ConfigApp() {
       const path = Array.isArray(update.path) ? update.path : [];
       const key = String(path[path.length - 1] || "");
       const parentPath = path.slice(0, -1);
+      if (
+        path[0] === "TRACKERS" &&
+        trackerDefaultOverrideKeys.has(key) &&
+        update.removeKey
+      ) {
+        return "Inherit from DEFAULT";
+      }
+      if (
+        key === "tag_overrides" &&
+        ((path[0] === "DEFAULT" && path.length === 2) ||
+          (path[0] === "TRACKERS" && path.length === 3))
+      ) {
+        const originalGroups = parseReleaseGroupOverrides(update.originalValue);
+        const nextGroups = parseReleaseGroupOverrides(update.value);
+        if (!originalGroups || !nextGroups)
+          return "Release group overrides changed";
+        const added = Object.keys(nextGroups).filter(
+          (name) => !Object.prototype.hasOwnProperty.call(originalGroups, name),
+        );
+        const removed = Object.keys(originalGroups).filter(
+          (name) => !Object.prototype.hasOwnProperty.call(nextGroups, name),
+        );
+        const updated = Object.keys(nextGroups).filter(
+          (name) =>
+            Object.prototype.hasOwnProperty.call(originalGroups, name) &&
+            serializeReleaseGroupOverrides({ [name]: originalGroups[name] }) !==
+              serializeReleaseGroupOverrides({ [name]: nextGroups[name] }),
+        );
+        return (
+          [
+            ["Added", added],
+            ["Removed", removed],
+            ["Updated", updated],
+          ]
+            .filter(([, names]) => names.length)
+            .map(
+              ([action, names]) =>
+                `${action} ${names.length === 1 ? "group" : "groups"} ${names.join(", ")}`,
+            )
+            .join("; ") || "Release group overrides changed"
+        );
+      }
       if (path[0] === "TRACKERS" && key === "default_trackers") {
         const normalizeTrackers = (value) =>
           String(value || "")
@@ -11095,29 +11988,18 @@ function ConfigApp() {
     }
     for (const [trackerName, pathKeys] of availableTrackerChanges) {
       const settingCount = pathKeys.length;
-      const normalizedTrackerName = String(trackerName).toUpperCase();
-      const overrideChange = Array.from(
-        pendingTrackerOverrideModes.entries(),
-      ).find(
-        ([pendingTrackerName]) =>
-          String(pendingTrackerName).toUpperCase() === normalizedTrackerName,
-      );
       const detailParts = [
         `${settingCount} setting${settingCount === 1 ? "" : "s"} changed`,
       ];
-      if (overrideChange) {
-        detailParts.push(
-          `DEFAULT overrides ${overrideChange[1] ? "enabled" : "removed"}`,
-        );
-      }
+      const groupUpdate = pathKeys
+        .map((pathKey) => pendingChanges.get(pathKey))
+        .find((update) => update.path[2] === "tag_overrides");
+      if (groupUpdate) detailParts.push(describeValue(groupUpdate));
       summaries.push({
         id: `available-tracker:${trackerName}`,
         kind: "available-tracker",
         trackerName,
         pathKeys,
-        overrideChange: overrideChange
-          ? { trackerName: overrideChange[0], enabled: overrideChange[1] }
-          : null,
         title: `Configure tracker › ${getTrackerDisplayName(trackerName)}`,
         detail: detailParts.join("; "),
       });
@@ -11163,21 +12045,6 @@ function ConfigApp() {
         detail: getTrackerDisplayName(String(trackerName)),
       });
     }
-    for (const [trackerName, enabled] of pendingTrackerOverrideModes) {
-      if (availableTrackerChanges.has(String(trackerName).toUpperCase())) {
-        continue;
-      }
-      summaries.push({
-        id: `tracker-overrides:${trackerName}`,
-        kind: "tracker-overrides",
-        trackerName,
-        enabled,
-        title: "Tracker-specific DEFAULT overrides",
-        detail: `${getTrackerDisplayName(String(trackerName))}: ${
-          enabled ? "Enable" : "Remove"
-        }`,
-      });
-    }
     return summaries;
   }, [
     pendingChanges,
@@ -11185,7 +12052,6 @@ function ConfigApp() {
     pendingRemovedTrackers,
     pendingRenamedTorrentClients,
     pendingTorrentClients,
-    pendingTrackerOverrideModes,
     trackerCatalog,
   ]);
   useEffect(() => {
@@ -11193,19 +12059,6 @@ function ConfigApp() {
       setIsPendingSummaryOpen(false);
     }
   }, [pendingChangeCount]);
-  const discardTrackerOverrideChange = (trackerName, enabled) => {
-    const trackerSection = sections.find(
-      (section) => section.section === "TRACKERS",
-    );
-    const trackerItem = trackerSection?.items?.find(
-      (item) =>
-        String(item.key).toUpperCase() === String(trackerName).toUpperCase(),
-    );
-    const overrideItems = (trackerItem?.children || []).filter((item) =>
-      trackerDefaultOverrideKeys.has(item.key),
-    );
-    toggleTrackerOverrides(trackerName, !enabled, overrideItems);
-  };
   const discardPendingSummary = (summary) => {
     if (summary.kind === "field") {
       setPendingChanges((currentChanges) => {
@@ -11244,12 +12097,6 @@ function ConfigApp() {
           }),
         );
       });
-      if (summary.overrideChange) {
-        discardTrackerOverrideChange(
-          summary.overrideChange.trackerName,
-          summary.overrideChange.enabled,
-        );
-      }
     } else if (summary.kind === "client-add") {
       removePendingTorrentClient(summary.clientName);
     } else if (summary.kind === "client-rename") {
@@ -11258,8 +12105,6 @@ function ConfigApp() {
       undoRemoveTorrentClient(summary.clientName);
     } else if (summary.kind === "tracker-remove") {
       undoRemoveTracker(summary.trackerName);
-    } else if (summary.kind === "tracker-overrides") {
-      discardTrackerOverrideChange(summary.trackerName, summary.enabled);
     }
   };
   const saveDisabled = isSaving || pendingChangeCount === 0;
@@ -11300,7 +12145,7 @@ function ConfigApp() {
     }
   };
 
-  return (
+  const configPage = (
     <div
       className={
         "ua-config-page min-h-screen " +
@@ -11355,6 +12200,8 @@ function ConfigApp() {
 
       <div className="min-h-screen">
         <ConfigApplicationRail
+          trackers={trackerCatalog.trackers}
+          onOpenTracker={openTrackerSettings}
           isMobileLayout={isMobileLayout}
           colorTheme={colorTheme}
           onColorThemeChange={handleColorThemeChange}
@@ -11386,6 +12233,8 @@ function ConfigApp() {
           onPointerCancel={cancelMobileNavGesture}
         >
           <ConfigSidebar
+            trackers={trackerCatalog.trackers}
+            onOpenTracker={openTrackerSettings}
             isMobileLayout={isMobileLayout}
             sections={sections}
             activeTab={activeTab}
@@ -11613,6 +12462,8 @@ function ConfigApp() {
                     {activeSection && (
                       <React.Fragment>
                         <ItemList
+                          requestedTracker={requestedTracker}
+                          onSavedApiKeyStatus={updateSavedApiKeyStatus}
                           items={visibleItems}
                           pathParts={[activeSection.section]}
                           depth={0}
@@ -11631,11 +12482,6 @@ function ConfigApp() {
                           }
                           trackerCatalog={trackerCatalog}
                           pendingChanges={pendingChanges}
-                          pendingTrackerOverrideModes={
-                            pendingTrackerOverrideModes
-                          }
-                          trackerOverrideEditors={trackerOverrideEditors}
-                          onToggleTrackerOverrides={toggleTrackerOverrides}
                           onAddTorrentClient={addPendingTorrentClient}
                           onRemovePendingTorrentClient={
                             removePendingTorrentClient
@@ -11652,6 +12498,8 @@ function ConfigApp() {
                           externalToolStatusError={externalToolStatusError}
                           isCheckingExternalTools={isCheckingExternalTools}
                           onCheckExternalTools={checkExternalTools}
+                          onTestProwlarr={testProwlarr}
+                          prowlarrTestState={prowlarrTestState}
                           onBrowseFolder={browseForFolder}
                           onValueChange={onValueChange}
                         />
@@ -11677,6 +12525,21 @@ function ConfigApp() {
         </div>
       </div>
     </div>
+  );
+
+  return (
+    <OverrideDraftContext.Provider value={overrideDrafts}>
+      <TrackerDefaultValuesContext.Provider
+        value={Object.fromEntries(
+          [...trackerDefaultOverrideKeys, "tag_overrides"].map((key) => [
+            key,
+            getEffectiveDefaultValue(key),
+          ]),
+        )}
+      >
+        {configPage}
+      </TrackerDefaultValuesContext.Provider>
+    </OverrideDraftContext.Provider>
   );
 }
 

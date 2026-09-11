@@ -18,6 +18,7 @@ from src.languages import languages_manager
 from src.meta import Meta
 from src.rehostimages import RehostImagesManager
 from src.tmdb import TmdbManager
+from src.tracker_images import get_tracker_image_collection, set_tracker_image_collection
 from src.trackers.common import Common
 
 
@@ -98,6 +99,7 @@ class GreatPosterWall:
         "pixhost.to": "pixhost",
         "imgbox.com": "imgbox",
         "img.pterclub.com": "pterclub",
+        "s3.pterclub.com": "pterclub",
         "yes.ilikeshots.club": "ilikeshots",
     }
     supported_categories = ("MOVIE",)
@@ -244,7 +246,7 @@ class GreatPosterWall:
 
     async def rehost_unapproved_images(self, meta: Meta) -> None:
         """Import public image URLs to GPW's KShare host before the normal host check."""
-        image_list = meta.image_list
+        image_list = get_tracker_image_collection(meta, self.tracker, "screenshots")
         if not isinstance(image_list, list) or not image_list:
             return
         if not self.api_key:
@@ -283,7 +285,7 @@ class GreatPosterWall:
                 rehosted_image.update({"img_url": hosted_url, "raw_url": hosted_url, "web_url": hosted_url})
                 rehosted_images.append(rehosted_image)
 
-        meta.image_list = rehosted_images
+        set_tracker_image_collection(meta, self.tracker, "screenshots", rehosted_images)
 
     async def check_image_hosts(self, meta: Meta) -> None:
         # Rule: 2.2.1. Screenshots: They have to be saved at kshare.club, pixhost.to, img.pterclub.com, yes.ilikeshots.club, imgbox.com, s3.pterclub.com
@@ -792,12 +794,19 @@ class GreatPosterWall:
             raw_stars = imdb_info.get("stars", [])
             raw_stars_id = imdb_info.get("stars_id", [])
 
-            directors = [x.strip() for x in raw_directors if isinstance(x, str) and x.strip()]
-            directors_id = [x.strip() for x in raw_directors_id if isinstance(x, str) and re.match(r"^nm\d+$", x.strip())]
-            writers = [x.strip() for x in raw_writers if isinstance(x, str) and x.strip()]
-            writers_id = [x.strip() for x in raw_writers_id if isinstance(x, str) and re.match(r"^nm\d+$", x.strip())]
-            stars = [x.strip() for x in raw_stars if isinstance(x, str) and x.strip()]
-            stars_id = [x.strip() for x in raw_stars_id if isinstance(x, str) and re.match(r"^nm\d+$", x.strip())]
+            def valid_credit_pairs(raw_names: Any, raw_ids: Any) -> tuple[list[str], list[str]]:
+                if not isinstance(raw_names, list) or not isinstance(raw_ids, list):
+                    return [], []
+                pairs = [
+                    (name.strip(), person_id.strip())
+                    for name, person_id in zip(raw_names, raw_ids, strict=False)
+                    if isinstance(name, str) and name.strip() and isinstance(person_id, str) and re.match(r"^nm\d+$", person_id.strip())
+                ]
+                return [name for name, _ in pairs], [person_id for _, person_id in pairs]
+
+            directors, directors_id = valid_credit_pairs(raw_directors, raw_directors_id)
+            writers, writers_id = valid_credit_pairs(raw_writers, raw_writers_id)
+            stars, stars_id = valid_credit_pairs(raw_stars, raw_stars_id)
 
         first_director_id = directors_id[0].strip() if isinstance(directors_id, list) and directors_id else ""
         first_director_name = directors[0].strip() if isinstance(directors, list) and directors else ""
@@ -943,6 +952,9 @@ class GreatPosterWall:
             except (ValueError, KeyError, TypeError, IndexError) as e:
                 logger.debug(f"{self.tracker}: Failed to process response payload on {self.tracker}: {escape(str(e))}", exc_info=True)
                 continue
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                logger.debug(f"{self.tracker}: Request to {url} failed: {escape(str(e))}", exc_info=True)
+                continue
 
         return best_response
 
@@ -1022,8 +1034,8 @@ class GreatPosterWall:
         if "DV" in hdr:
             flags["dolby_vision"] = "on"
 
-            if "HDR" in hdr:
-                flags["hdr10plus" if "HDR10+" in hdr else "hdr10"] = "on"
+        if "HDR" in hdr:
+            flags["hdr10plus" if "HDR10+" in hdr else "hdr10"] = "on"
 
         return flags
 

@@ -18,7 +18,7 @@ from src.description_review import get_base_description
 from src.exceptions import *  # noqa F403
 from src.meta import Meta
 from src.temp_paths import screenshots_dir
-from src.torrentcreate import TorrentCreator
+from src.torrent_policy import HDBITS_POLICY
 from src.trackers.common import Common
 
 Config = dict[str, Any]
@@ -38,6 +38,7 @@ class HDBits:
     banned_groups: tuple[str, ...] = ("",)
     base_url = "https://hdbits.org"
     supported_categories = ("TV", "MOVIE")
+    torrent_policy = HDBITS_POLICY
     tracker_urls = ("https://tracker.hdbits.org",)
 
     def __init__(self, config: Config) -> None:
@@ -255,28 +256,8 @@ class HDBits:
         async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt", encoding="utf-8") as desc_file:
             hdb_desc = await desc_file.read()
 
-        base_piece_mb = meta.base_torrent_piece_mb or 0
         torrent_file_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}].torrent"
-
-        # Check if the piece size exceeds 16 MiB and regenerate the torrent if needed
-        if base_piece_mb > 16 and not meta.nohash:
-            logger.info(f"{self.tracker}: [red]Piece size is OVER 16M and does not work on {self.tracker}. Generating a new .torrent")
-            hdb_config = self.config.get("TRACKERS", {}).get("HDBITS", {})
-            hdb_config_dict = cast(dict[str, Any], hdb_config) if isinstance(hdb_config, dict) else {}
-            tracker_url = str(hdb_config_dict.get("announce_url", "https://fake.tracker")).strip()
-            piece_size = 16
-            torrent_create = f"[{self.tracker}]"
-            try:
-                cooldown = int(self.config.get("DEFAULT", {}).get("rehash_cooldown", 0) or 0)
-            except ValueError, TypeError:
-                cooldown = 0
-            if cooldown > 0:
-                await asyncio.sleep(cooldown)  # Small cooldown before rehashing
-
-            await TorrentCreator.create_torrent(meta, str(meta.path), torrent_create, tracker_url=tracker_url, piece_size=piece_size)
-            await common.create_torrent_for_upload(meta, self.tracker, self.source_flag, torrent_filename=torrent_create)
-        else:
-            await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
+        await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
 
         # Proceed with the upload process
         async with aiofiles.open(torrent_file_path, "rb") as torrent_file:
