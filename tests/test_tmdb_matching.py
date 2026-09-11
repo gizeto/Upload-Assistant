@@ -18,6 +18,8 @@ def mock_tmdb(monkeypatch, results, details=None):
         requests.append(request.url.path)
         if "/search/" in request.url.path:
             return httpx.Response(200, json={"results": results})
+        if "/find/" in request.url.path:
+            return httpx.Response(200, json={"movie_results": [], "tv_results": []})
         movie_id = int(request.url.path.rsplit("/", 1)[1])
         detail = (details or {}).get(movie_id, {})
         if isinstance(detail, Exception):
@@ -55,10 +57,10 @@ def test_unknown_movie_runtime_does_not_change_ranking(monkeypatch, runtime):
     assert asyncio.run(tmdb.get_tmdb_id("Test Movie", None, "MOVIE", duration=1, unattended=True)) == (1, "MOVIE")
 
 
-def test_movie_choices_include_country_original_title_and_runtime(monkeypatch):
+def test_movie_choices_include_country_names_before_overview_original_title_and_runtime(monkeypatch):
     _, messages = mock_tmdb(
         monkeypatch,
-        [movie(1, original_title="Film Original"), movie(2)],
+        [movie(1, original_title="Film Original", overview="First overview"), movie(2, overview="Second overview")],
         {
             1: {"runtime": 100, "origin_country": ["PL", "DE"]},
             2: {"runtime": 100, "production_countries": [{"iso_3166_1": "US"}]},
@@ -69,10 +71,15 @@ def test_movie_choices_include_country_original_title_and_runtime(monkeypatch):
 
     choices = [message for message in messages if "[yellow]ID:" in message]
     assert len(choices) == 2
-    assert "Country:[/yellow] PL, DE" in choices[0]
+    first_country = messages.index("[green]Country:[/green] Poland, Germany")
+    assert messages[first_country - 1] == choices[0]
+    assert messages[first_country + 1] == "[green]Overview:[/green] First overview"
     assert "Original title:[/yellow] Film Original" in choices[0]
     assert "Duration:[/yellow] 100 min" in choices[0]
-    assert "Country:[/yellow] US" in choices[1]
+    second_country = messages.index("[green]Country:[/green] United States")
+    assert messages[second_country - 1] == choices[1]
+    assert messages[second_country + 1] == "[green]Overview:[/green] Second overview"
+    assert all("Country:" not in choice for choice in choices)
     assert "Original title:" not in choices[1]
     assert "Duration:[/yellow] 100 min" in choices[1]
     assert "similarity: 1.10" in choices[0]
@@ -86,7 +93,8 @@ def test_movie_details_failure_keeps_choices_available(monkeypatch, failure):
 
     choices = [message for message in messages if "[yellow]ID:" in message]
     assert len(choices) == 2
-    assert all("Country:[/yellow] Unknown" in choice and "Duration:[/yellow] Unknown" in choice for choice in choices)
+    assert all("Duration:[/yellow] Unknown" in choice for choice in choices)
+    assert messages.count("[green]Country:[/green] Unknown") == 2
 
 
 def test_tv_choices_show_country_and_original_name_without_runtime_boost(monkeypatch):
@@ -99,8 +107,8 @@ def test_tv_choices_show_country_and_original_name_without_runtime_boost(monkeyp
 
     choices = [message for message in messages if "[yellow]ID:" in message]
     assert len(choices) == 2
-    assert "Country:[/yellow] GB" in choices[0]
-    assert "Country:[/yellow] PL" in choices[1]
+    assert "[green]Country:[/green] United Kingdom" in messages
+    assert "[green]Country:[/green] Poland" in messages
     assert "Original title:[/yellow] Original Show" in choices[1]
     assert "similarity: 1.00" in choices[1]
     assert all("Duration:" not in choice for choice in choices)

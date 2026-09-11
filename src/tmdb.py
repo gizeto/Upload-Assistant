@@ -14,6 +14,7 @@ import anitopy
 import cli_ui
 import guessit
 import httpx
+import pycountry
 
 from src.args import Args
 from src.cleanup import cleanup_manager
@@ -759,7 +760,11 @@ async def get_tmdb_id(
                             countries = result.get("origin_country") or [
                                 country["iso_3166_1"] for country in (result.get("production_countries") or []) if country.get("iso_3166_1")
                             ]
-                            entry_details = f" [yellow]Country:[/yellow] {', '.join(countries) or 'Unknown'}"
+                            country_names: list[str] = []
+                            for code in countries:
+                                country = pycountry.countries.get(alpha_2=code) or pycountry.historic_countries.get(alpha_2=code)
+                                country_names.append(country.name if country else code)
+                            entry_details = ""
                             original_title = result.get("original_title") or result.get("original_name")
                             if original_title and original_title != title:
                                 entry_details += f" [yellow]Original title:[/yellow] {original_title}"
@@ -772,6 +777,7 @@ async def get_tmdb_id(
                                 f"[cyan]{idx + 1}.[/cyan] [bold]{title}[/bold] ({year}){entry_details} "
                                 f"[yellow]ID:[/yellow] {tmdb_url}{result['id']} [dim](similarity: {similarity_score:.2f})[/dim]"
                             )
+                            logger.info(f"[green]Country:[/green] {', '.join(country_names) or 'Unknown'}")
                             if overview:
                                 logger.info(f"[green]Overview:[/green] {overview[:200]}{'...' if len(overview) > 200 else ''}")
                             logger.info("")
