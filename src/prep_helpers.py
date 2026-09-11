@@ -1102,6 +1102,7 @@ async def search_metadata(
                 debug=debug,
                 secondary_title=meta.secondary_title,
                 unattended=unattended,
+                duration=duration,
             )
         )
         if meta.no_imdb:
@@ -1142,6 +1143,7 @@ async def search_metadata(
             mode=(meta.mode if meta.mode is not None else "non_cli"),
             category_preference=meta.category,
             imdb_info=meta.imdb_info,
+            duration=duration,
         )
 
         meta.category = category

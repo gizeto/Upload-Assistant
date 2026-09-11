@@ -72,6 +72,7 @@ class TmdbManager:
         mode: str = "non_cli",
         category_preference: str | None = None,
         imdb_info: dict[str, Any] | None = None,
+        duration: int | None = None,
     ) -> tuple[str, int | str, str, bool]:
         return await get_tmdb_from_imdb(
             imdb_id=imdb_id,
@@ -82,6 +83,7 @@ class TmdbManager:
             mode=mode,
             category_preference=category_preference,
             imdb_info=imdb_info,
+            duration=duration,
         )
 
     async def get_tmdb_id(
@@ -97,6 +99,7 @@ class TmdbManager:
         final_attempt: bool | None = None,
         new_category: str | None = None,
         unattended: bool = False,
+        duration: int | None = None,
     ) -> tuple[int, str]:
         return await get_tmdb_id(
             filename=filename,
@@ -110,6 +113,7 @@ class TmdbManager:
             final_attempt=final_attempt,
             new_category=new_category,
             unattended=unattended,
+            duration=duration,
         )
 
     async def tmdb_other_meta(
@@ -286,6 +290,7 @@ async def get_tmdb_from_imdb(
     mode: str = "non_cli",
     category_preference: str | None = None,
     imdb_info: dict[str, Any] | None = None,
+    duration: int | None = None,
 ) -> tuple[str, int | str, str, bool]:
     """Fetches TMDb ID using IMDb or TVDb ID.
 
@@ -366,11 +371,11 @@ async def get_tmdb_from_imdb(
 
     # Try as movie first
     fallback_movie_title = str(imdb_info.get("original title") or imdb_info.get("localized title") or "")
-    tmdb_id, category = await get_tmdb_id(title, year, "MOVIE", secondary_title=fallback_movie_title, debug=debug)
+    tmdb_id, category = await get_tmdb_id(title, year, "MOVIE", secondary_title=fallback_movie_title, debug=debug, duration=duration)
 
     # If no results, try as TV
     if tmdb_id == 0:
-        tmdb_id, category = await get_tmdb_id(title, year, "TV", secondary_title=fallback_movie_title, debug=debug)
+        tmdb_id, category = await get_tmdb_id(title, year, "TV", secondary_title=fallback_movie_title, debug=debug, duration=duration)
 
     # Extract necessary values from the result
     tmdb_id = tmdb_id or 0
@@ -385,6 +390,19 @@ async def get_tmdb_from_imdb(
     return category, tmdb_id, original_language, filename_search
 
 
+def _movie_duration_matches(category: str, duration: int | None, result: dict[str, Any]) -> bool:
+    """Compare the measured duration and TMDb runtime, both in minutes."""
+    runtime = result.get("runtime")
+    return (
+        category == "MOVIE"
+        and duration is not None
+        and duration > 0
+        and isinstance(runtime, (int, float))
+        and runtime > 0
+        and abs(duration - runtime) <= 1
+    )
+
+
 async def get_tmdb_id(
     filename: str,
     search_year: str | int | None,
@@ -397,7 +415,23 @@ async def get_tmdb_id(
     final_attempt: bool | None = None,
     new_category: str | None = None,
     unattended: bool = False,
+    duration: int | None = None,
 ) -> tuple[int, str]:
+    # Retain movie details across alternate title/year searches in this lookup.
+    movie_details: dict[int, dict[str, Any]] = {}
+
+    async def get_movie_details(client: httpx.AsyncClient, tmdb_id: int) -> dict[str, Any]:
+        if tmdb_id not in movie_details:
+            try:
+                response = await client.get(f"{TMDB_BASE_URL}/movie/{tmdb_id}", params={"api_key": tmdb_api_key})
+                response.raise_for_status()
+                details = response.json()
+                movie_details[tmdb_id] = details if isinstance(details, dict) else {}
+            except (httpx.HTTPError, ValueError):
+                logger.debug(f"[yellow]Unable to fetch details for TMDb movie {tmdb_id}; using search data.[/yellow]")
+                movie_details[tmdb_id] = {}
+        return movie_details[tmdb_id]
+
     search_results: dict[str, Any] = {"results": []}
     category_value = category.get("category", "MOVIE") if isinstance(category, dict) else category
     category_str: str = str(new_category or category_value or "MOVIE")
@@ -530,6 +564,13 @@ async def get_tmdb_id(
                             tmdb_id = summary_exact_matches.pop()
                             return tmdb_id, category
 
+                        if category == "MOVIE":
+                            details = await asyncio.gather(*(get_movie_details(client, int(r["id"])) for r in limited_results))
+                            for result, movie in zip(limited_results, details, strict=True):
+                                for key in ("runtime", "origin_country", "production_countries"):
+                                    if key in movie:
+                                        result[key] = movie[key]
+
                         # If no exact matches, calculate similarity for all results and sort them
                         results_with_similarity: list[tuple[dict[str, Any], float]] = []
                         for r in limited_results:
@@ -598,6 +639,10 @@ async def get_tmdb_id(
                                 elif result_year == search_year_int + 1:
                                     similarity += 0.1  # Boost for +1 year (handles TMDB/IMDb differences)
 
+                            if _movie_duration_matches(category, duration, r):
+                                similarity += 0.1
+                                logger.debug(f"[cyan]  Movie duration matches within one minute; boosted similarity to {similarity:.3f}[/cyan]")
+
                             results_with_similarity.append((r, similarity))
 
                         # Give a slight boost to the first result for TV shows (often the main series)
@@ -664,6 +709,8 @@ async def get_tmdb_id(
                                     the_title = await normalize_title(str(the_result.get("name", "")))
                                 the_title_without_the = the_title[4:]
                                 new_similarity = SequenceMatcher(None, filename_norm, the_title_without_the).ratio()
+                                if _movie_duration_matches(category, duration, the_result):
+                                    new_similarity += 0.1
 
                                 logger.debug(f"[cyan]Checking 'The' prefix: '{the_title}' -> '{the_title_without_the}'[/cyan]")
                                 logger.debug(f"[cyan]Original similarity: {the_similarity:.3f}, New similarity: {new_similarity:.3f}[/cyan]")
@@ -709,9 +756,21 @@ async def get_tmdb_id(
                             year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
                             overview = result.get("overview", "")
                             similarity_score = results_with_similarity[idx][1]
+                            countries = result.get("origin_country") or [
+                                country["iso_3166_1"] for country in (result.get("production_countries") or []) if country.get("iso_3166_1")
+                            ]
+                            entry_details = f" [yellow]Country:[/yellow] {', '.join(countries) or 'Unknown'}"
+                            original_title = result.get("original_title") or result.get("original_name")
+                            if original_title and original_title != title:
+                                entry_details += f" [yellow]Original title:[/yellow] {original_title}"
+                            if category == "MOVIE":
+                                runtime = result.get("runtime")
+                                runtime_display = f"{runtime} min" if isinstance(runtime, (int, float)) and runtime > 0 else "Unknown"
+                                entry_details += f" [yellow]Duration:[/yellow] {runtime_display}"
 
                             logger.info(
-                                f"[cyan]{idx + 1}.[/cyan] [bold]{title}[/bold] ({year}) [yellow]ID:[/yellow] {tmdb_url}{result['id']} [dim](similarity: {similarity_score:.2f})[/dim]"
+                                f"[cyan]{idx + 1}.[/cyan] [bold]{title}[/bold] ({year}){entry_details} "
+                                f"[yellow]ID:[/yellow] {tmdb_url}{result['id']} [dim](similarity: {similarity_score:.2f})[/dim]"
                             )
                             if overview:
                                 logger.info(f"[green]Overview:[/green] {overview[:200]}{'...' if len(overview) > 200 else ''}")
