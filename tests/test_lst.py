@@ -2,8 +2,34 @@
 
 import asyncio
 
+import pytest
+
 from src.meta import Meta
 from src.trackers.UNIT3D.lst import LST
+
+
+@pytest.mark.parametrize("category", ["MOVIE", "TV", "MUSIC", "BOOK"])
+@pytest.mark.parametrize(
+    ("trump_reason", "were_trumping", "existing_tracker", "same_title", "suffix"),
+    [
+        ("exact_match", True, "LST", True, " - TRUMP"),
+        ("trumpable_release", True, "LST", True, " - TRUMP"),
+        ("exact_match", True, "LST", False, ""),
+        ("trumpable_release", True, "LST", False, ""),
+        ("exact_match", False, "LST", True, ""),
+        ("exact_match", True, "AITHER", True, ""),
+    ],
+)
+def test_lst_trump_suffix_depends_on_final_tracker_title(category, trump_reason, were_trumping, existing_tracker, same_title, suffix):
+    tracker = LST({"DEFAULT": {}, "TRACKERS": {"LST": {}}})
+    meta = Meta(category=category, name="Original release name", title="Example Title", author="Example Author", year=2024, type="WEB-DL")
+    title = asyncio.run(tracker.get_name(meta))["name"]
+    meta.were_trumping = were_trumping
+    meta.trump_reason = trump_reason
+    meta.initial_dupes = {existing_tracker: [{"name": title if same_title else title + "-OtherGroup"}]}
+
+    assert asyncio.run(tracker.get_name(meta))["name"] == title + suffix
+    assert meta.name == "Original release name"
 
 
 def test_lst_music_payload_includes_discogs_release_and_master_ids():

@@ -154,10 +154,7 @@ class Aither(UNIT3D):
             aither_name = aither_name.replace(meta.source or "", f"{resolution} {meta.source}", 1)
             aither_name = aither_name.replace((meta.audio), f"{video_codec} {meta.audio}", 1)
 
-        if meta.trump_reason == "exact_match":
-            aither_name = aither_name + " - TRUMP"
-
         if alt_title and year:
             aither_name = aither_name.replace(f"{year} {alt_title}", f"{alt_title} {year}", 1)
 
-        return {"name": aither_name}
+        return {"name": self._append_trump(aither_name, meta)}

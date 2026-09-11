@@ -209,10 +209,7 @@ class LST(UNIT3D):
                 lst_name = lst_name.replace(str(meta.source), f"{resolution}", 1)
                 lst_name = lst_name.replace(meta.video_codec, f"{meta.audio} {meta.video_codec}", 1)
 
-        if meta.trump_reason == "exact_match":
-            lst_name = lst_name + " - TRUMP"
-
-        return {"name": lst_name}
+        return {"name": self._append_trump(lst_name, meta)}
 
     @staticmethod
     def _with_tag(parts: list[str], tag: str | None) -> str:
@@ -221,10 +218,6 @@ class LST(UNIT3D):
         name = " ".join(name.split())
         normalized_tag = str(tag or "").strip().lstrip("-").strip()
         return f"{name}-{normalized_tag}" if normalized_tag else name
-
-    @staticmethod
-    def _append_trump(name: str, meta: Meta) -> str:
-        return f"{name} - TRUMP" if meta.trump_reason == "exact_match" else name
 
     @staticmethod
     def _release_field(release: dict[str, Any], name: str, default: Any = "") -> Any:

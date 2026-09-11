@@ -209,7 +209,7 @@ class BitPorn(UNIT3D):
         """Build only the documented BitPorn upload fields."""
         data: dict[str, str] = {}
         for getter in (
-            self.get_name,
+            self.get_upload_name,
             self.get_description,
             self.get_mediainfo,
             self.get_bdinfo,

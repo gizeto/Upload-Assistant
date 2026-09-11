@@ -22,6 +22,7 @@ from src.config_helpers import format_terminal_link
 from src.console import logger, prompt_in_thread
 from src.meta import Meta
 from src.prompt_sound import play_prompt_sound
+from src.trackers.UNIT3D import UNIT3D
 from src.trackersetup import tracker_class_map
 
 _dupe_prompt_lock_held = contextvars.ContextVar("dupe_prompt_lock_held", default=False)
@@ -311,13 +312,14 @@ class UploadHelper:
         dupes_list: list[DupeEntry | str] = dupes
         upload: bool = False
         meta.were_trumping = False
+        meta[f"{tracker_name}_dupe_override"] = False
         if not dupes_list:
             logger.debug(f"[green]No dupes found at[/green] [yellow]{tracker_name}[/yellow]")
             return False, meta
         tracker_class_factory = cast(Callable[..., Any], self.tracker_class_map[tracker_name])
         tracker_class = tracker_class_factory(config=self.config)
         try:
-            tracker_rename = await tracker_class.get_name(meta)
+            tracker_rename = await tracker_class.get_upload_name(meta) if isinstance(tracker_class, UNIT3D) else await tracker_class.get_name(meta)
         except Exception:
             tracker_rename = None
         display_name: str | None = None
@@ -507,6 +509,10 @@ class UploadHelper:
 
         if upload is False:
             return True, meta
+        if isinstance(tracker_class, UNIT3D):
+            # Approval also allows a title collision when the trump report is manual.
+            meta[f"{tracker_name}_dupe_override"] = True
+            return False, meta
         for each in dupes_list:
             each_name = str(each.get("name")) if isinstance(each, dict) else each
             if each_name == meta.name:

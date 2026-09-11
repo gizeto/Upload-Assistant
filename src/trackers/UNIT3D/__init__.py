@@ -185,7 +185,23 @@ class UNIT3D:
         return dupes
 
     async def get_name(self, meta: Meta) -> dict[str, str]:
-        return {"name": meta.name}
+        return {"name": self._append_trump(meta.name, meta)}
+
+    async def get_upload_name(self, meta: Meta) -> dict[str, str]:
+        """Apply shared title rules after the tracker's own name formatting."""
+        data = await self.get_name(meta)
+        return {**data, "name": self._append_trump(data["name"], meta)}
+
+    def _append_trump(self, name: str, meta: Meta) -> str:
+        """Disambiguate a trump upload only when its final tracker title is taken."""
+        if name.rstrip().endswith(" - TRUMP"):
+            return name
+        if meta.were_trumping or meta.get(f"{self.tracker}_dupe_override", False):
+            for torrent in meta.initial_dupes.get(self.tracker, []):
+                existing_name = torrent.get("name", "") if isinstance(torrent, dict) else torrent
+                if isinstance(existing_name, str) and existing_name.strip().casefold() == name.strip().casefold():
+                    return f"{name} - TRUMP"
+        return name
 
     async def get_description(self, meta: Meta) -> Any:
         return {
@@ -406,7 +422,7 @@ class UNIT3D:
 
     async def get_data(self, meta: Meta) -> dict[str, str]:
         results = await asyncio.gather(
-            self.get_name(meta),
+            self.get_upload_name(meta),
             self.get_description(meta),
             self.get_mediainfo(meta),
             self.get_bdinfo(meta),

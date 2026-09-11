@@ -15,6 +15,7 @@ from src.meta import Meta
 from src.metadata_searching import get_douban_id
 from src.trackers.AVISTAZ.routing import AvistaZNetworkRouter
 from src.trackers.GAZELLE.passthepopcorn import PassThePopcorn
+from src.trackers.UNIT3D import UNIT3D
 from src.trackersetup import TrackerSetup, tracker_class_map
 from src.uphelper import UploadHelper
 
@@ -245,6 +246,7 @@ class TrackerStatusManager:
                     else:
                         dupes = []
 
+                    local_meta.initial_dupes[tracker_name] = copy.deepcopy(dupes)
                     async with meta_lock:
                         if "initial_dupes" not in meta:
                             meta.initial_dupes = {}
@@ -273,6 +275,8 @@ class TrackerStatusManager:
 
                         # Only shared-state writes go under the lock
                         async with meta_lock:
+                            if isinstance(tracker_class, UNIT3D):
+                                meta[f"{tracker_name}_dupe_override"] = local_meta.get(f"{tracker_name}_dupe_override", False)
                             if matched_episode_ids:
                                 meta[f"{tracker_name}_matched_episode_ids"] = matched_episode_ids
                             if trumpable_id:
@@ -298,7 +302,7 @@ class TrackerStatusManager:
                 # Determine name change for display during interactive prompt
                 if not local_tracker_status["banned"] and not local_tracker_status["skipped"] and not local_tracker_status["dupe"]:
                     try:
-                        tracker_rename = await tracker_class.get_name(local_meta)
+                        tracker_rename = await tracker_class.get_upload_name(local_meta) if isinstance(tracker_class, UNIT3D) else await tracker_class.get_name(local_meta)
                     except Exception:
                         tracker_rename = None
 
