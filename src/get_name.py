@@ -48,6 +48,12 @@ class NameManager:
                 meta.distributor = distributor
             if region and "SKIPPED" not in region:
                 meta.region = region
+        name_notag, name, potential_missing = self.render_name(meta)
+        clean_name = await self.clean_filename(name)
+        return name_notag, name, clean_name, potential_missing
+
+    def render_name(self, meta: Meta, *, year_override: str | None = None, aka_before_year: bool = False) -> tuple[str, str, list[str]]:
+        """Format resolved metadata without prompts, I/O, or metadata changes."""
         type = str(meta.type).upper()
         title = meta.title
         alt_title = meta.aka
@@ -112,6 +118,12 @@ class NameManager:
             logger.debug(f"TYPE: {meta.type}")
             logger.debug("[cyan]get_name meta:")
             # logger.debug(meta)
+
+        if year_override is not None:
+            year = year_override
+        if aka_before_year and alt_title:
+            title = f"{title} {alt_title}"
+            alt_title = ""
 
         # YAY NAMING FUN
         name = ""
@@ -212,8 +224,7 @@ class NameManager:
         tag_already_present = meta.category == "XXX" and bool(tag) and name_notag.casefold().endswith(tag.casefold())
         name = name_notag if meta.manual_name is not None or tag_already_present else name_notag + tag
 
-        clean_name = await self.clean_filename(name)
-        return name_notag, name, clean_name, potential_missing
+        return name_notag, name, potential_missing
 
     def extract_book_name(self, meta: Meta) -> str:
         comic = meta.comic

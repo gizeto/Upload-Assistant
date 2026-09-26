@@ -365,6 +365,7 @@ class Meta:
     original_language: str | None = None
     original_mal: int = 0
     original_title: str = ""
+    tmdb_title: str = ""
     original_tmdb: int = 0
     original_tvdb: int = 0
     original_tvmaze: int = 0

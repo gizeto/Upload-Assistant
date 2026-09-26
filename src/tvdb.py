@@ -6,6 +6,7 @@ import json
 import os
 import re
 import ssl
+import unicodedata
 from pathlib import Path
 from typing import Any, cast
 from urllib.error import URLError
@@ -13,6 +14,7 @@ from urllib.error import URLError
 import httpx
 
 from src.console import logger
+from src.meta import Meta
 from src.metadata_cache import cache_for, is_cache_miss
 
 YEAR_PATTERN = re.compile(r"\((19\d\d|20[0-3]\d)\)")
@@ -270,6 +272,65 @@ def _get_tvdb_or_warn(config: dict[str, Any] | None = None) -> TVDB | None:
 class TvdbData:
     def __init__(self, config: Any) -> None:
         self.config = config
+
+    async def get_naming_year(self, meta: Meta) -> str:
+        """Include a year only for an explicit TVDB qualifier or a title collision."""
+        def qualifier(title: str) -> str:
+            match = re.search(r"\s+\(((?:18|19|20|21)\d{2})\)\s*$", title)
+            return match[1] if match else ""
+
+        def normalized(title: str) -> str:
+            title = re.sub(r"\s+\((?:18|19|20|21)\d{2}\)\s*$", "", title)
+            return "".join(c for c in unicodedata.normalize("NFKC", title).casefold() if c.isalnum())
+
+        title = meta.tvdb_series_name or ""
+        if qualifier(title):
+            return qualifier(title)
+        if not meta.tvdb_id:
+            return ""
+        key = json.dumps({"id": meta.tvdb_id, "title": title, "year": meta.year, "first_aired": meta.first_air_date}, sort_keys=True)
+        cache = cache_for(meta.base_dir, self.config)
+        try:
+            cached = await cache.get("tvdb", "naming_year", key)
+            if not is_cache_miss(cached) and isinstance(cached, dict):
+                return str(cached.get("year") or "")
+            client = _get_tvdb_or_warn(self.config)
+            if client is None:
+                return ""
+            series_year = str(meta.first_air_date or "")[:4] or meta.year
+            if not title:
+                info = await client.get_series_extended(int(meta.tvdb_id))
+                translated = await client.get_series_translation(int(meta.tvdb_id), "eng")
+                title = str(translated.get("name") or info.get("name") or "")
+                series_year = info.get("year") or str(info.get("firstAired") or "")[:4] or meta.year
+            year = qualifier(title)
+            if not year and title:
+                query = re.sub(r"\s+\((?:18|19|20|21)\d{2}\)\s*$", "", title)
+                # Search all years; duplicate rows for one ID are not a collision.
+                offset = 0
+                seen_pages: set[str] = set()
+                while True:
+                    results = await client.search(query, type="series", limit=100, offset=offset)
+                    fingerprint = json.dumps(results, sort_keys=True)
+                    if fingerprint in seen_pages:
+                        raise ValueError("TVDB search repeated a page")
+                    seen_pages.add(fingerprint)
+                    for result in results:
+                        translations = result.get("translations") or {}
+                        name = translations.get("eng") if isinstance(translations, dict) else None
+                        name = name or result.get("name") or ""
+                        result_id = str(result.get("tvdb_id") or result.get("id") or "").removeprefix("series-")
+                        if result_id.isdigit() and int(result_id) != int(meta.tvdb_id) and normalized(str(name)) == normalized(title):
+                            year = str(series_year or "")
+                            break
+                    if year or len(results) < 100:
+                        break
+                    offset += len(results)
+            await cache.set("tvdb", "naming_year", key, {"year": year})
+            return year
+        except Exception as error:
+            logger.warning(f"Could not determine Aither TV year from TVDB: {error}")
+            return ""
 
     async def get_season_episode_numbers(self, series_id: int, season: int) -> list[int] | None:
         """Fetch a fresh, fully paginated season in TVDB's default episode order.

@@ -3,11 +3,15 @@ import re
 from typing import Any, ClassVar
 
 from src.console import logger
+from src.get_name import NameManager
 from src.languages import languages_manager
 from src.meta import Meta
+from src.tmdb import get_tmdb_primary_title
+from src.trackers.aither_naming import select_aka
 from src.trackers.common import Common
 from src.trackers.naming import add_incomplete_pack_marker
 from src.trackers.UNIT3D import UNIT3D
+from src.tvdb import TvdbData
 
 
 class Aither(UNIT3D):
@@ -134,6 +138,23 @@ class Aither(UNIT3D):
         return await self.common.unit3d_region_ids(reverse=True, region_id=normalized_id)
 
     async def get_name(self, meta: Meta):
+        meta = meta.copy()
+        if meta.manual_name is not None:
+            return {"name": add_incomplete_pack_marker(str(meta.manual_name).strip(), meta, self.tracker)}
+        resolved_year: str | None = None
+        if meta.type and meta.category in ("MOVIE", "TV") and not meta.is_sports:
+            if not meta.tmdb_title:
+                meta.tmdb_title, meta.original_title = await get_tmdb_primary_title(meta, self.config)
+            meta.title = meta.tmdb_title
+            meta.aka = select_aka(meta, meta.title)
+            resolved_year = str(meta.year or "")
+            if meta.category == "TV" and not meta.no_year and (meta.manual_year or 0) <= 0:
+                resolved_year = await TvdbData(self.config).get_naming_year(meta)
+            if meta.manual_year and meta.manual_year > 0:
+                resolved_year = str(meta.manual_year)
+            if meta.no_year:
+                resolved_year = ""
+            _, meta.name, _ = NameManager(self.config).render_name(meta, year_override=resolved_year, aka_before_year=True)
         aither_name: str = meta.name
         resolution: str = meta.resolution
         video_codec: str = meta.video_codec
@@ -150,6 +171,8 @@ class Aither(UNIT3D):
             year = manual_year_value
         if meta.no_year:
             year = ""
+        if resolved_year is not None:
+            year = resolved_year
 
         if not meta.language_checked:
             await languages_manager.process_desc_language(meta, tracker=self.tracker)
