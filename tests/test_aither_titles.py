@@ -185,7 +185,7 @@ async def test_missing_tmdb_does_not_use_tvdb():
 async def test_tmdb_title_errors_are_provider_specific(tmp_path, monkeypatch):
     monkeypatch.setattr('src.tmdb.tmdb_api_key', None)
     meta = release('', '', tmdb_id=123, base_dir=str(tmp_path))
-    with pytest.raises(ValueError, match='^TMDB API key is missing for primary title lookup$'):
+    with pytest.raises(ValueError, match='^TMDB API key is missing for metadata lookup$'):
         await get_tmdb_primary_title(meta, CONFIG)
     cache = cache_for(str(tmp_path), CONFIG)
     await cache.set('tmdb', 'main', json.dumps({'category': 'MOVIE', 'id': 123}, sort_keys=True), {'title': ''})
