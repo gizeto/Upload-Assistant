@@ -63,6 +63,34 @@ def test_aka_fallback_and_romanized_alias():
     assert select_aka(meta, 'English') == ''
 
 
+@pytest.mark.parametrize('imdb_aka,original,prepared,anime,expected', [
+    ('IMDb alternate', 'TMDB original', 'AKA Anime title', True, 'AKA IMDb alternate'),
+    ('PRIMARY!', 'TMDB original', '', False, 'AKA TMDB original'),
+    ('한국어', 'TMDB original', '', False, 'AKA 한국어'),
+    ('한국어', 'TMDB original', 'AKA Anime title', True, 'AKA Anime title'),
+    ('Primary', 'PRIMARY!', 'AKA Anime title', True, 'AKA Anime title'),
+    ('Primary', 'PRIMARY!', 'AKA Anime title', False, ''),
+])
+def test_aka_source_priority(imdb_aka, original, prepared, anime, expected):
+    meta = release('Primary', original, imdb_info={'aka': imdb_aka}, retrieved_aka=prepared, anime=anime)
+    before = meta.to_dict()
+    assert select_aka(meta, 'Primary') == expected
+    assert meta.to_dict() == before
+
+
+@pytest.mark.parametrize('language,expected', [('Korean', 'AKA Hangug-eo'), (None, 'AKA Hangug-eo'), ('Unknown language', 'AKA 한국어')])
+def test_romanization_filters_aliases_before_selection(language, expected):
+    meta = release('Primary', '한국어', original_language='ko', imdb_info={'aka': 'Primary', 'akas': [
+        None,
+        {'title': 'Wrong language', 'language': 'Japanese', 'attributes': ['romanized title']},
+        {'title': 'Unmarked alias', 'language': 'Korean'},
+        {'title': '한국어', 'language': 'Korean', 'attributes': ['romanized title']},
+        {'title': 'PRIMARY!', 'language': 'Korean', 'attributes': ['romanised title']},
+        {'title': 'Hangug-eo', 'language': language, 'attributes': ['transliterated title']},
+    ]})
+    assert select_aka(meta, 'Primary') == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('title,year,other,expected', [
     ('Example Show…?', 2021, 'EXAMPLE / SHOW', '2021'),
@@ -212,6 +240,20 @@ async def test_tvdb_search_paginates_without_language_filter(tmp_path, monkeypat
     assert await TvdbData(CONFIG).get_naming_year(meta) == '2020'
     assert [call.kwargs['offset'] for call in client.search.call_args_list] == [0, 100]
     assert all('language' not in call.kwargs for call in client.search.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_tvdb_repeated_page_failure_is_retried(tmp_path, monkeypatch):
+    page = [{'tvdb_id': str(i + 10), 'name': f'Other {i}'} for i in range(100)]
+    client = AsyncMock()
+    client.search.side_effect = [page, page, [{'tvdb_id': '2', 'name': 'Title'}]]
+    monkeypatch.setattr('src.tvdb._get_tvdb_or_warn', lambda _: client)
+    meta = Meta(tvdb_id=1, tvdb_series_name='Title', year=2020, base_dir=str(tmp_path))
+    handler = TvdbData(CONFIG)
+    assert await handler.get_naming_year(meta) == ''
+    assert await handler.get_naming_year(meta) == '2020'
+    assert await handler.get_naming_year(meta) == '2020'
+    assert client.search.await_count == 3
 
 
 @pytest.mark.asyncio

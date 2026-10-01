@@ -73,6 +73,40 @@ def _best_effort_series_year(series_info: dict[str, Any] | None) -> str | None:
     return _extract_year_from_text(series_info.get("year")) or _extract_year_from_text(series_info.get("slug"))
 
 
+def _naming_year_qualifier(title: str) -> str:
+    match = NAMING_YEAR_PATTERN.search(title)
+    return match[1] if match else ""
+
+
+def _naming_title_key(title: str) -> str:
+    title = NAMING_YEAR_PATTERN.sub("", title)
+    return "".join(char for char in unicodedata.normalize("NFKC", title).casefold() if char.isalnum())
+
+
+async def _has_series_title_collision(client: TVDB, title: str, series_id: int) -> bool:
+    """Search all years and languages for the same title under another ID."""
+    query = NAMING_YEAR_PATTERN.sub("", title)
+    selected_key = _naming_title_key(title)
+    offset = 0
+    seen_pages: set[str] = set()
+    while True:
+        results = await client.search(query, type="series", limit=100, offset=offset)
+        fingerprint = json.dumps(results, sort_keys=True)
+        if fingerprint in seen_pages:
+            raise ValueError("TVDB search repeated a page")
+        seen_pages.add(fingerprint)
+        for result in results:
+            translations = result.get("translations") or {}
+            name = translations.get("eng") if isinstance(translations, dict) else None
+            name = name or result.get("name") or ""
+            result_id = str(result.get("tvdb_id") or result.get("id") or "").removeprefix("series-")
+            if result_id.isdigit() and int(result_id) != series_id and _naming_title_key(str(name)) == selected_key:
+                return True
+        if len(results) < 100:
+            return False
+        offset += len(results)
+
+
 async def _series_translation_metadata(
     client: Any,
     series_id: int,
@@ -276,17 +310,9 @@ class TvdbData:
 
     async def get_naming_year(self, meta: Meta) -> str:
         """Include a year only for an explicit TVDB qualifier or a title collision."""
-        def qualifier(title: str) -> str:
-            match = NAMING_YEAR_PATTERN.search(title)
-            return match[1] if match else ""
-
-        def normalized(title: str) -> str:
-            title = NAMING_YEAR_PATTERN.sub("", title)
-            return "".join(c for c in unicodedata.normalize("NFKC", title).casefold() if c.isalnum())
-
         title = meta.tvdb_series_name or ""
-        if qualifier(title):
-            return qualifier(title)
+        if year := _naming_year_qualifier(title):
+            return year
         if not meta.tvdb_id:
             return ""
         key = json.dumps({"id": meta.tvdb_id, "title": title, "year": meta.year, "first_aired": meta.first_air_date}, sort_keys=True)
@@ -304,29 +330,9 @@ class TvdbData:
                 translated = await _series_translation_metadata(client, int(meta.tvdb_id), _as_dict_list(info.get("aliases", [])), _series_info=info)
                 title = str(translated.get("series_title") or info.get("name") or "")
                 series_year = info.get("year") or str(info.get("firstAired") or "")[:4] or meta.year
-            year = qualifier(title)
-            if not year and title:
-                query = NAMING_YEAR_PATTERN.sub("", title)
-                # Search all years; duplicate rows for one ID are not a collision.
-                offset = 0
-                seen_pages: set[str] = set()
-                while True:
-                    results = await client.search(query, type="series", limit=100, offset=offset)
-                    fingerprint = json.dumps(results, sort_keys=True)
-                    if fingerprint in seen_pages:
-                        raise ValueError("TVDB search repeated a page")
-                    seen_pages.add(fingerprint)
-                    for result in results:
-                        translations = result.get("translations") or {}
-                        name = translations.get("eng") if isinstance(translations, dict) else None
-                        name = name or result.get("name") or ""
-                        result_id = str(result.get("tvdb_id") or result.get("id") or "").removeprefix("series-")
-                        if result_id.isdigit() and int(result_id) != int(meta.tvdb_id) and normalized(str(name)) == normalized(title):
-                            year = str(series_year or "")
-                            break
-                    if year or len(results) < 100:
-                        break
-                    offset += len(results)
+            year = _naming_year_qualifier(title)
+            if not year and title and await _has_series_title_collision(client, title, int(meta.tvdb_id)):
+                year = str(series_year or "")
             await cache.set("tvdb", "naming_year", key, {"year": year})
             return year
         except Exception as error:

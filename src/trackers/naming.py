@@ -2,6 +2,8 @@
 
 import re
 import unicodedata
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 import langcodes
 from unidecode import unidecode
@@ -39,46 +41,47 @@ def _latin_title(title: str) -> bool:
     return all("LATIN" in unicodedata.name(char, "") for char in title if char.isalpha())
 
 
+def _first_distinct_title(candidates: Iterable[Any], title: str, *, latin_only: bool = False) -> str:
+    primary_key = title_key(title)
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        candidate = re.sub(r"^AKA\s+", "", value.strip(), flags=re.IGNORECASE)
+        if candidate and title_key(candidate) != primary_key and (not latin_only or _latin_title(candidate)):
+            return candidate
+    return ""
+
+
+def _romanized_imdb_titles(meta: Meta) -> Iterator[str]:
+    aliases = meta.imdb_info.get("akas", [])
+    for alias in aliases if isinstance(aliases, list) else []:
+        if not isinstance(alias, dict):
+            continue
+        attributes = str(alias.get("attributes", "")).casefold()
+        if not any(marker in attributes for marker in ("romanized", "romanised", "transliterated")):
+            continue
+        language = alias.get("language")
+        if language and meta.original_language:
+            try:
+                if langcodes.find(str(language)).language != langcodes.get(meta.original_language).language:
+                    continue
+            except LookupError, ValueError:
+                continue
+        name = alias.get("title")
+        if isinstance(name, str):
+            yield name
+
+
 def select_aka(meta: Meta, title: str) -> str:
-    """Select a distinct source AKA, preserving available romanized titles."""
+    """Prefer a source AKA, using romanization when its script is non-Latin."""
     if meta.no_aka:
         return ""
-    romanized_aka = ""
-    if meta.anime:
-        # Preparation already resolves AniList's romaji title.
-        for name in (meta.retrieved_aka, meta.aka):
-            name = re.sub(r"^AKA\s+", "", (name or "").strip(), flags=re.IGNORECASE)
-            if name and _latin_title(name) and title_key(name) != title_key(title):
-                romanized_aka = f"AKA {name}"
-                break
-    for candidate in (meta.imdb_info.get("aka"), meta.original_title):
-        if not isinstance(candidate, str):
-            continue
-        candidate = re.sub(r"^AKA\s+", "", candidate.strip(), flags=re.IGNORECASE)
-        if not candidate or title_key(candidate) == title_key(title):
-            continue
-        if not _latin_title(candidate):
-            aliases = meta.imdb_info.get("akas", [])
-            for alias in aliases if isinstance(aliases, list) else []:
-                if not isinstance(alias, dict):
-                    continue
-                language = alias.get("language")
-                if language and meta.original_language:
-                    try:
-                        if langcodes.find(str(language)).language != langcodes.get(meta.original_language).language:
-                            continue
-                    except LookupError, ValueError:
-                        continue
-                name = alias.get("title")
-                attributes = str(alias.get("attributes", "")).casefold()
-                if (isinstance(name, str) and name.strip() and _latin_title(name)
-                    and any(marker in attributes for marker in ("romanized", "romanised", "transliterated"))
-                    and title_key(name) != title_key(title)):
-                    return f"AKA {name.strip()}"
-            if romanized_aka:
-                return romanized_aka
-        return f"AKA {candidate}"
-    return romanized_aka
+    candidate = _first_distinct_title((meta.imdb_info.get("aka"), meta.original_title), title)
+    prepared = _first_distinct_title((meta.retrieved_aka, meta.aka), title, latin_only=True) if meta.anime else ""
+    if candidate and not _latin_title(candidate):
+        candidate = _first_distinct_title(_romanized_imdb_titles(meta), title, latin_only=True) or prepared or candidate
+    selected = candidate or prepared
+    return f"AKA {selected}" if selected else ""
 
 
 def add_incomplete_pack_marker(name: str, meta: Meta, tracker: str) -> str:
