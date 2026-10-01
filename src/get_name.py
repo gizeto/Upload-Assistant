@@ -12,7 +12,10 @@ import guessit
 from src.cleanup import cleanup_manager
 from src.console import logger
 from src.meta import Meta
+from src.tmdb import get_tmdb_primary_title
 from src.trackers.common import Common
+from src.trackers.naming import select_aka
+from src.tvdb import TvdbData
 
 guessit_module: Any = cast(Any, guessit)
 GuessitFn = Callable[[str, dict[str, Any] | None], dict[str, Any]]
@@ -51,6 +54,32 @@ class NameManager:
         name_notag, name, potential_missing = self.render_name(meta)
         clean_name = await self.clean_filename(name)
         return name_notag, name, clean_name, potential_missing
+
+    async def render_tracker_name(
+        self, meta: Meta, *, use_tmdb_title: bool = False, tvdb_year: bool = False, aka_before_year: bool = False
+    ) -> tuple[str, str]:
+        """Render opt-in tracker naming rules without changing shared metadata.
+
+        Return the name and resolved year for subsequent tracker formatting.
+        """
+        if meta.manual_name is not None:
+            return str(meta.manual_name).strip(), ""
+        meta = meta.copy()
+        if use_tmdb_title and meta.category in ("MOVIE", "TV"):
+            meta.title, meta.original_title = await get_tmdb_primary_title(meta, self.config)
+            meta.aka = select_aka(meta, meta.title)
+
+        year = str(meta.year or "")
+        if meta.category == "TV":
+            year = str(meta.year or "") if meta.search_year != "" else ""
+            if tvdb_year and not meta.no_year and (meta.manual_year or 0) <= 0:
+                year = await TvdbData(self.config).get_naming_year(meta)
+        if meta.manual_year and meta.manual_year > 0:
+            year = str(meta.manual_year)
+        if meta.no_year:
+            year = ""
+        _, name, _ = self.render_name(meta, year_override=year, aka_before_year=aka_before_year)
+        return name, year
 
     def render_name(self, meta: Meta, *, year_override: str | None = None, aka_before_year: bool = False) -> tuple[str, str, list[str]]:
         """Format resolved metadata without prompts, I/O, or metadata changes."""

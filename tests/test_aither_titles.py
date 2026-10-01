@@ -8,7 +8,7 @@ from src.meta import Meta
 from src.metadata_cache import cache_for
 from src.tmdb import get_tmdb_primary_title
 from src.trackers.UNIT3D.aither import Aither
-from src.trackers.aither_naming import select_aka
+from src.trackers.naming import select_aka
 from src.tvdb import TvdbData
 
 CONFIG = {'DEFAULT': {}, 'TRACKERS': {'AITHER': {}}}
@@ -117,6 +117,54 @@ async def test_naming_overrides(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_manual_name_keeps_trump_and_incomplete_markers(monkeypatch):
+    title_lookup = AsyncMock()
+    year_lookup = AsyncMock()
+    monkeypatch.setattr('src.get_name.get_tmdb_primary_title', title_lookup)
+    monkeypatch.setattr(TvdbData, 'get_naming_year', year_lookup)
+    meta = release('', '', 'TV', manual_name=' My exact name S01 ', trump_reason='exact_match',
+                   tv_pack=True, season='S01', season_pack_incomplete=True)
+    before = meta.to_dict()
+    assert (await Aither(CONFIG).get_name(meta))['name'] == 'My exact name S01 INCOMPLETE - TRUMP'
+    assert meta.to_dict() == before
+    title_lookup.assert_not_awaited()
+    year_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original,retrieved,existing', [
+    ('日本語の題名', 'AKA Nihongo no daimei', ''),
+    ('日本語の題名', None, 'AKA Nihongo no daimei'),
+    ('English title', 'AKA Nihongo no daimei', ''),
+])
+async def test_anime_preserves_prepared_romanized_aka(original, retrieved, existing):
+    meta = release('English title', original, anime=True, original_language='ja',
+                   retrieved_aka=retrieved, aka=existing, imdb_info={'aka': 'English title', 'akas': []})
+    before = meta.to_dict()
+    assert (await Aither(CONFIG).get_name(meta))['name'].startswith('English title AKA Nihongo no daimei 2020')
+    assert meta.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('use_tmdb_title,tvdb_year,aka_before_year,prefix,lookup_count', [
+    (False, False, False, 'Shared title AKA Existing alternate S01', 0),
+    (True, False, False, 'TMDB title AKA Original S01', 0),
+    (False, True, False, 'Shared title 1981 AKA Existing alternate S01', 1),
+    (True, True, True, 'TMDB title AKA Original 1981 S01', 1),
+])
+async def test_tracker_naming_options_are_independent(monkeypatch, use_tmdb_title, tvdb_year, aka_before_year, prefix, lookup_count):
+    year_lookup = AsyncMock(return_value='1981')
+    monkeypatch.setattr(TvdbData, 'get_naming_year', year_lookup)
+    meta = release('TMDB title', 'Original', 'TV', title='Shared title', aka='AKA Existing alternate', season='S01')
+    before = meta.to_dict()
+    name, year = await NameManager(CONFIG).render_tracker_name(meta, use_tmdb_title=use_tmdb_title, tvdb_year=tvdb_year, aka_before_year=aka_before_year)
+    assert name.startswith(prefix)
+    assert year == ('1981' if tvdb_year else '')
+    assert year_lookup.await_count == lookup_count
+    assert meta.to_dict() == before
+
+
+@pytest.mark.asyncio
 async def test_legacy_metadata_recovers_cached_tmdb_title(tmp_path):
     meta = release('Title', 'Original', tmdb_title='', tmdb_id=123, base_dir=str(tmp_path))
     cache = cache_for(str(tmp_path), CONFIG)
@@ -131,6 +179,18 @@ async def test_missing_tmdb_does_not_use_tvdb():
     meta = release('Title', 'Original', tmdb_title='', tvdb_series_name='TVDB title')
     with pytest.raises(ValueError, match='requires TMDB'):
         await Aither(CONFIG).get_name(meta)
+
+
+@pytest.mark.asyncio
+async def test_tmdb_title_errors_are_provider_specific(tmp_path, monkeypatch):
+    monkeypatch.setattr('src.tmdb.tmdb_api_key', None)
+    meta = release('', '', tmdb_id=123, base_dir=str(tmp_path))
+    with pytest.raises(ValueError, match='^TMDB API key is missing for primary title lookup$'):
+        await get_tmdb_primary_title(meta, CONFIG)
+    cache = cache_for(str(tmp_path), CONFIG)
+    await cache.set('tmdb', 'main', json.dumps({'category': 'MOVIE', 'id': 123}, sort_keys=True), {'title': ''})
+    with pytest.raises(ValueError, match='^TMDB primary title is missing$'):
+        await get_tmdb_primary_title(meta, CONFIG)
 
 
 def test_shared_renderer_keeps_existing_order_and_metadata():
@@ -163,6 +223,19 @@ async def test_tvdb_can_load_selected_series(tmp_path, monkeypatch):
     meta = Meta(tvdb_id=1, year=2009, base_dir=str(tmp_path))
     assert await TvdbData(CONFIG).get_naming_year(meta) == '1981'
     client.search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('title,search_count', [('Example Show (2020)', 0), ('Example Show', 1)])
+async def test_tvdb_missing_translation_uses_extended_metadata(tmp_path, monkeypatch, title, search_count):
+    client = AsyncMock()
+    client.get_series_extended.return_value = {'name': title, 'firstAired': '2020-01-01'}
+    client.get_series_translation.side_effect = RuntimeError('No English translation')
+    client.search.return_value = [{'tvdb_id': '2', 'name': 'Example Show (1981)'}]
+    monkeypatch.setattr('src.tvdb._get_tvdb_or_warn', lambda _: client)
+    meta = Meta(tvdb_id=1, year=1999, base_dir=str(tmp_path))
+    assert await TvdbData(CONFIG).get_naming_year(meta) == '2020'
+    assert client.search.await_count == search_count
 
 
 @pytest.mark.asyncio

@@ -2073,16 +2073,18 @@ async def get_tmdb_localized_data(meta: Meta, data_type: str, language: str, app
 
 
 async def get_tmdb_primary_title(meta: Meta, config: dict[str, Any]) -> tuple[str, str]:
-    """Recover source titles for metadata saved before tmdb_title was recorded."""
+    """Return recorded source titles, fetching them for legacy metadata."""
+    if meta.tmdb_title:
+        return meta.tmdb_title, meta.original_title
     if not meta.tmdb_id or meta.category not in ("MOVIE", "TV"):
-        raise ValueError("Aither automatic naming requires TMDB metadata")
+        raise ValueError("Primary title lookup requires TMDB metadata")
     cache = cache_for(meta.base_dir, config)
     key = json.dumps({"category": meta.category, "id": meta.tmdb_id}, sort_keys=True)
     data = await cache.get("tmdb", "main", key)
     if is_cache_miss(data) or not isinstance(data, dict):
         api_key = config.get("DEFAULT", {}).get("tmdb_api") or tmdb_api_key
         if not api_key:
-            raise ValueError("TMDB API key is missing for Aither title lookup")
+            raise ValueError("TMDB API key is missing for primary title lookup")
         endpoint = "movie" if meta.category == "MOVIE" else "tv"
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(f"{TMDB_BASE_URL}/{endpoint}/{meta.tmdb_id}", params={"api_key": api_key, "language": "en-US"})
@@ -2094,5 +2096,5 @@ async def get_tmdb_primary_title(meta: Meta, config: dict[str, Any]) -> tuple[st
     field = "title" if meta.category == "MOVIE" else "name"
     title = data.get(field)
     if not isinstance(title, str) or not title.strip():
-        raise ValueError("TMDB primary title is missing for Aither naming")
+        raise ValueError("TMDB primary title is missing")
     return title.strip(), str(data.get(f"original_{field}") or title).strip()

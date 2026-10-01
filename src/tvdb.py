@@ -18,6 +18,7 @@ from src.meta import Meta
 from src.metadata_cache import cache_for, is_cache_miss
 
 YEAR_PATTERN = re.compile(r"\((19\d\d|20[0-3]\d)\)")
+NAMING_YEAR_PATTERN = re.compile(r"\s+\(((?:18|19|20|21)\d{2})\)\s*$")
 
 
 tvdb: TVDB | None = None
@@ -276,11 +277,11 @@ class TvdbData:
     async def get_naming_year(self, meta: Meta) -> str:
         """Include a year only for an explicit TVDB qualifier or a title collision."""
         def qualifier(title: str) -> str:
-            match = re.search(r"\s+\(((?:18|19|20|21)\d{2})\)\s*$", title)
+            match = NAMING_YEAR_PATTERN.search(title)
             return match[1] if match else ""
 
         def normalized(title: str) -> str:
-            title = re.sub(r"\s+\((?:18|19|20|21)\d{2}\)\s*$", "", title)
+            title = NAMING_YEAR_PATTERN.sub("", title)
             return "".join(c for c in unicodedata.normalize("NFKC", title).casefold() if c.isalnum())
 
         title = meta.tvdb_series_name or ""
@@ -300,12 +301,12 @@ class TvdbData:
             series_year = str(meta.first_air_date or "")[:4] or meta.year
             if not title:
                 info = await client.get_series_extended(int(meta.tvdb_id))
-                translated = await client.get_series_translation(int(meta.tvdb_id), "eng")
-                title = str(translated.get("name") or info.get("name") or "")
+                translated = await _series_translation_metadata(client, int(meta.tvdb_id), _as_dict_list(info.get("aliases", [])), _series_info=info)
+                title = str(translated.get("series_title") or info.get("name") or "")
                 series_year = info.get("year") or str(info.get("firstAired") or "")[:4] or meta.year
             year = qualifier(title)
             if not year and title:
-                query = re.sub(r"\s+\((?:18|19|20|21)\d{2}\)\s*$", "", title)
+                query = NAMING_YEAR_PATTERN.sub("", title)
                 # Search all years; duplicate rows for one ID are not a collision.
                 offset = 0
                 seen_pages: set[str] = set()
@@ -329,7 +330,7 @@ class TvdbData:
             await cache.set("tvdb", "naming_year", key, {"year": year})
             return year
         except Exception as error:
-            logger.warning(f"Could not determine Aither TV year from TVDB: {error}")
+            logger.warning(f"Could not determine naming year from TVDB: {error}")
             return ""
 
     async def get_season_episode_numbers(self, series_id: int, season: int) -> list[int] | None:
