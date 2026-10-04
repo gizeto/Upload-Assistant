@@ -279,6 +279,9 @@ config: dict[str, Any] = {
         # Apply PAR scaling to DVD screenshots and DVD menu captures by default.
         # Set to False to keep their coded dimensions instead.
         "scale_dvd_screenshots_for_par": True,
+        # Maximum seconds per DVD screenshot attempt or single-pass VOB batch.
+        # Increase for slow storage or long titles that require sequential decoding.
+        "dvd_screenshot_timeout": 1800,
         # Maximum number of FFmpeg processes that can run at once.
         # The effective limit is the lower of this value and the number of screenshots.
         "process_limit": "4",

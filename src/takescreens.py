@@ -51,6 +51,8 @@ tone_map = False
 ffmpeg_compression = "6"
 LOSTIMG_MIN_SIZE = 75_000
 LOSTIMG_MAX_SIZE = 20_000_000
+DVD_CAPTURE_STATUS_INTERVAL = 30
+type DvdCaptureTask = tuple[int, str, str, str, Meta, float, float, float, float] | tuple[int, str, str, str, Meta, float, float, float, float, int | None]
 
 
 def is_valid_lostimg_image_size(image_size: int) -> bool:
@@ -412,11 +414,13 @@ async def run_ffmpeg(command: Any) -> tuple[int | None, bytes, bytes]:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=3)
+                # Drain captured output while waiting: wait() alone can block
+                # when a verbose process fills one of its pipe buffers.
+                await asyncio.wait_for(process.communicate(), timeout=3)
             except TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
                     process.kill()
-                await process.wait()
+                await process.communicate()
         raise
     return process.returncode, stdout, stderr
 
@@ -912,6 +916,11 @@ async def dvd_screenshots(
     title_vobs = [str(Path(meta.discs[disc_num]["path"]) / f"VTS_{vob}") for vob in content_vobs]
     disc_path = Path(meta.discs[disc_num]["path"])
     dvd_title = await matching_dvd_title(disc_path, ifo_duration)
+    if dvd_title is None:
+        logger.info(
+            "[yellow]No matching seekable DVD title found; using sequential VOB decoding for screenshots. "
+            "Later frames can take longer to capture.[/yellow]"
+        )
     input_file = title_vobs[0] if len(title_vobs) == 1 else f"concat:{'|'.join(title_vobs)}"
     voblength = 0.0
     for title_vob in title_vobs:
@@ -972,7 +981,7 @@ async def dvd_screenshots(
 
         logger.debug(f"[cyan]Collected frame information for {len(frame_info_results)} frames")
 
-    num_workers = min(num_screens + 1, task_limit)
+    num_workers = 1 if dvd_title is None else min(num_screens + 1, task_limit)
 
     logger.debug(f"Using {num_workers} worker(s) for {num_screens} image(s)")
 
@@ -981,14 +990,23 @@ async def dvd_screenshots(
 
     async def capture_dvd_with_semaphore(args: tuple[int, str, str, str, Meta, float, float, float, float, int | None]) -> tuple[int, str | None]:
         async with semaphore:
-            return await capture_dvd_screenshot(args)
+            return await capture_dvd_screenshot(args, vob_fallback=False)
 
-    for i in range(num_screens + 1):
-        if not Path(image_paths[i]).exists() or meta.retake:
-            capture_tasks.append(capture_dvd_with_semaphore((i, input_files[i], image_paths[i], ss_times[i], meta, width, height, w_sar, h_sar, dvd_title)))
+    dvd_capture_args: list[DvdCaptureTask] = [
+        (i, input_files[i], image_paths[i], ss_times[i], meta, width, height, w_sar, h_sar, dvd_title)
+        for i in range(num_screens + 1) if not Path(image_paths[i]).exists() or meta.retake
+    ]
 
     capture_results: list[str] = []
-    results = await asyncio.gather(*capture_tasks)
+    if dvd_title is None:
+        results = await capture_dvd_batch(dvd_capture_args)
+    else:
+        capture_tasks = [capture_dvd_with_semaphore(args) for args in dvd_capture_args]
+        results = await asyncio.gather(*capture_tasks)
+        failed_indices = {index for index, image in results if image is None}
+        if failed_indices:
+            fallback_args = [args for args in dvd_capture_args if args[0] in failed_indices]
+            results = [(index, image) for index, image in results if image is not None] + await capture_dvd_batch(fallback_args)
     filtered_results: list[tuple[int, str | None]] = list(results)
 
     if len(filtered_results) != len(results):
@@ -1071,73 +1089,120 @@ async def dvd_screenshots(
         await cleanup_manager.cleanup()
 
 
-async def capture_dvd_screenshot(
-    task: tuple[int, str, str, str, Meta, float, float, float, float] | tuple[int, str, str, str, Meta, float, float, float, float, int | None],
-) -> tuple[int, str | None]:
+def dvd_capture_filters(meta: Meta, seek_time: float, width: float, height: float, w_sar: float, h_sar: float) -> str:
+    filters = []
+    if w_sar != 1 or h_sar != 1:
+        filters.append(f"scale={round_to_even(width * w_sar)}:{round_to_even(height * h_sar)}")
+    filters.extend(overlay_filters(default_config, meta, seek_time, False, dvd=True))
+    return ",".join(filters) if filters else "format=rgb24"
+
+
+async def capture_dvd_batch(tasks: list[DvdCaptureTask]) -> list[tuple[int, str | None]]:
+    """Decode a VOB title once, trimming each output before scaling and overlays."""
+    if not tasks:
+        return []
+    meta = tasks[0][4]
+    source = cast(Any, ffmpeg).input(tasks[0][1], **({"threads": 1} if ffmpeg_limit else {}))
+    branches = "".join(f"[dvd_source{i}]" for i in range(len(tasks)))
+    graph = [f"[0:v:0]split={len(tasks)}{branches}"]
+    outputs = []
+    for branch, task in enumerate(tasks):
+        _index, _input_file, image, seek_time_str, meta, width, height, w_sar, h_sar, *_title = task
+        seek_time = float(seek_time_str)
+        vf_chain = dvd_capture_filters(meta, seek_time, width, height, w_sar, h_sar)
+        # Sequential trimming preserves the timestamp handling of output -ss,
+        # including DVD discontinuities. Only the selected frames reach the
+        # expensive scale/overlay filters, and all outputs share one decoder.
+        graph.append(f"[dvd_source{branch}]trim=start={seek_time}:duration=1,setpts=PTS-STARTPTS,{vf_chain}[dvd_image{branch}]")
+        outputs.append(source.output(image, map=f"[dvd_image{branch}]", vframes=1, compression_level=ffmpeg_compression, pred="mixed", update=1, threads=1))
+        Path(image).unlink(missing_ok=True)
+    command = cast(Any, ffmpeg).merge_outputs(*outputs).global_args(
+        "-filter_complex", ";".join(graph), "-filter_complex_threads", "1",
+        "-y", "-loglevel", "verbose" if meta.ffdebug else "error", "-hide_banner",
+    )
+    logger.info(f"[cyan]Capturing {len(tasks)} DVD screenshot(s) in one sequential VOB decoding pass.[/cyan]")
+    if meta.debug or meta.ffdebug:
+        logger.info(f"FFmpeg command: {' '.join(compile_ffmpeg_command(command))}", extra={"markup": False})
+    latest = max(tasks, key=lambda task: float(task[3]))
+    returncode, _stdout, stderr = await run_dvd_capture(command, latest[2], float(latest[3]))
+    if returncode != 0:
+        logger.error(f"[red]DVD screenshot batch failed:[/red]\n{stderr.decode(errors='replace')}")
+    results: list[tuple[int, str | None]] = []
+    for task in tasks:
+        index, image = task[0], task[2]
+        if Path(image).is_file() and (returncode == 0 or dvd_screenshot_has_content(image)):
+            results.append((index, image))
+        else:
+            Path(image).unlink(missing_ok=True)
+            results.append((index, None))
+    return results
+
+
+async def capture_dvd_screenshot(task: DvdCaptureTask, *, vob_fallback: bool = True) -> tuple[int, str | None]:
     index, input_file, image, seek_time_str, meta, width, height, w_sar, h_sar, *title_option = task
     dvd_title = title_option[0] if title_option else None
     seek_time = float(seek_time_str)
 
     try:
-        loglevel = "verbose" if meta.ffdebug else "quiet"
-        # Build filter chain
-        vf_filters: list[str] = []
-        if w_sar != 1 or h_sar != 1:
-            scaled_w = round_to_even(width * w_sar)
-            scaled_h = round_to_even(height * h_sar)
-            vf_filters.append(f"scale={scaled_w}:{scaled_h}")
-
-        vf_filters.extend(overlay_filters(default_config, meta, seek_time, False, dvd=True))
-
-        # Build command
-        # Always ensure at least format filter is present for PNG compression to work
-        if not vf_filters:
-            vf_filters.append("format=rgb24")
-        vf_chain = ",".join(vf_filters)
+        if dvd_title is None:
+            return (await capture_dvd_batch([task]))[0]
+        loglevel = "verbose" if meta.ffdebug else "error"
+        vf_chain = dvd_capture_filters(meta, seek_time, width, height, w_sar, h_sar)
 
         # Build ffmpeg-python command and run via run_ffmpeg
-        input_options: dict[str, Any] = {}
-        output_options: dict[str, Any] = {"ss": str(seek_time)}
-        source = input_file
-        if dvd_title is not None:
-            input_options.update(format="dvdvideo", title=dvd_title, ss=str(seek_time))
-            output_options.clear()
-            source = str(Path(input_file.removeprefix("concat:").split("|", 1)[0]).parent)
+        source = str(Path(input_file.removeprefix("concat:").split("|", 1)[0]).parent)
         info_command: Any = (
             cast(Any, ffmpeg)
-            .input(source, **input_options)
-            .output(image, vframes=1, vf=vf_chain, compression_level=ffmpeg_compression, pred="mixed", update=1, **output_options)
+            .input(source, format="dvdvideo", title=dvd_title, ss=str(seek_time))
+            .output(image, vframes=1, vf=vf_chain, compression_level=ffmpeg_compression, pred="mixed", update=1)
             .global_args("-y", "-loglevel", loglevel, "-hide_banner")
         )
 
         if loglevel == "verbose" or (meta and meta.debug):
             logger.info(f"[cyan]FFmpeg command: {' '.join(compile_ffmpeg_command(info_command))}[/cyan]")
 
-        returncode, _stdout, stderr = await run_ffmpeg(info_command)
+        returncode, _stdout, stderr = await run_dvd_capture(info_command, image, seek_time)
 
-        if returncode != 0 and dvd_title is not None:
-            logger.warning(f"[yellow]DVD title capture failed at {seek_time}s; retrying with VOB decoding.[/yellow]")
+        if returncode != 0 or not Path(image).is_file():
+            logger.warning(f"[yellow]DVD title capture failed at {seek_time}s: {stderr.decode(errors='replace')}[/yellow]")
             Path(image).unlink(missing_ok=True)
-            fallback_command: Any = (
-                cast(Any, ffmpeg)
-                .input(input_file)
-                .output(image, ss=str(seek_time), vframes=1, vf=vf_chain, compression_level=ffmpeg_compression, pred="mixed", update=1)
-                .global_args("-y", "-loglevel", loglevel, "-hide_banner")
-            )
-            returncode, _stdout, stderr = await run_ffmpeg(fallback_command)
-
-        if returncode != 0:
-            logger.error(f"[red]Error capturing screenshot for {input_file} at {seek_time}s:[/red]\n{stderr.decode()}")
-            return (index, None)
-
-        if Path(image).exists():
-            return (index, image)
-        logger.info(f"[red]Screenshot creation failed for {image}[/red]")
-        return (index, None)
+            if not vob_fallback:
+                return (index, None)
+            return (await capture_dvd_batch([task]))[0]
+        return (index, image)
 
     except Exception as e:
         logger.error(f"[red]Error capturing screenshot for {input_file} at {seek_time}s: {e}[/red]")
         return (index, None)
+
+
+async def run_dvd_capture(command: Any, image: str, seek_time: float) -> tuple[int | None, bytes, bytes]:
+    """Bound each DVD capture attempt and report long sequential VOB decoding."""
+    timeout = _positive_config_int("dvd_screenshot_timeout", 1800)
+    started = time.monotonic()
+    capture_task = asyncio.create_task(run_ffmpeg(command))
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                done, _pending = await asyncio.wait({capture_task}, timeout=DVD_CAPTURE_STATUS_INTERVAL)
+                if done:
+                    return capture_task.result()
+                elapsed = int(time.monotonic() - started)
+                logger.info(
+                    f"[yellow]Still capturing DVD screenshot {Path(image).name} at {seek_time:g}s "
+                    f"({elapsed}s elapsed, {timeout}s limit). When using VOB fallback, decoding reads from the start of the title.[/yellow]"
+                )
+    except TimeoutError:
+        message = f"DVD screenshot capture timed out after {timeout}s at {seek_time:g}s. Increase DEFAULT.dvd_screenshot_timeout for slow storage or decoding."
+        logger.warning(f"[yellow]{message}[/yellow]")
+        return -1, b"", message.encode()
+    finally:
+        if not capture_task.done():
+            capture_task.cancel()
+        # run_ffmpeg owns and terminates its process when cancelled. Await it
+        # before a fallback starts or the next worker uses this output path.
+        with contextlib.suppress(asyncio.CancelledError):
+            await capture_task
 
 
 async def extract_embedded_cover_from_audiobook(meta: Meta, dest_path: str, confirmed_only: bool = False) -> bool:
