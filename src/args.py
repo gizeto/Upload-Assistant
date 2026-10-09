@@ -412,6 +412,7 @@ class Args:
                 "midnightscene": "MidnightScene",
                 "passtheimage": "PassTheImage",
                 "seedpool_cdn": "Seedpool CDN",
+                "thrimg": "THRImg",
                 "utppm": "UTPPM",
                 "lostimg": "LostImg",
             }
@@ -848,6 +849,7 @@ class Args:
                 "midnightscene",
                 "passtheimage",
                 "seedpool_cdn",
+                "thrimg",
                 "utppm",
                 "lostimg",
             ],
@@ -1130,6 +1132,9 @@ class Args:
                     value2 = self.list_to_string(value_list)
                     if key == "manual_type":
                         meta.manual_type = value2.upper().replace("-", "")
+                    elif key in ("region", "distributor"):
+                        meta[key] = value2.strip().upper()
+                        meta[f"bluray_auto_{key}"] = None
                     elif key == "tag":
                         meta[key] = f"-{value2}"
                     elif key == "description_file" or key == "comparison":

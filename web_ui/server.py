@@ -16,6 +16,7 @@ import queue
 import re
 import secrets
 import shlex
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -38,6 +39,7 @@ import web_ui.auth as auth_mod
 from src.webui_progress import PROGRESS_STDOUT_PREFIX
 from src.prompt_sound import PROMPT_SOUND_STDOUT_MARKER
 from src.app_paths import CODE_DIR, DATA_DIR, STATE_DIR
+from src.webui_paths import MAX_UPLOAD_PATHS, QUEUE_ENV, QUEUE_HASH_ENV, ROOTS_ENV, InspectedDirectories, validate_argument_paths, validate_content_path
 from src.args import cli_argument_catalog, tracker_cli_aliases
 from src.config_sync import ConfigSyncError, ConfigWriteConflict, config_write_lock, replace_config_source
 from src.external_tools import EXTERNAL_TOOL_KEYS, check_external_tools
@@ -340,17 +342,9 @@ def _assert_safe_resolved_path(path: str | Path) -> None:
     abs_path = str(Path(path_str).resolve())
     real_path = os.path.realpath(abs_path)
 
-    # Check for webui_queue file
-    path_obj = Path(real_path)
-    if path_obj.name.startswith("webui_queue_") and path_obj.suffix == ".txt":
-        repo_tmp_dir = Path(__file__).resolve().parent.parent / "tmp"
-        if repo_tmp_dir.resolve().exists():
-            # Ensure it is actually inside repo_tmp_dir
-            try:
-                if os.path.commonpath([real_path, os.path.realpath(str(repo_tmp_dir.resolve()))]) == os.path.realpath(str(repo_tmp_dir.resolve())):
-                    return
-            except ValueError:
-                pass
+    # Only queues issued by this running WebUI get an exception to content roots.
+    if _is_generated_queue(real_path):
+        return
 
     roots = _get_browse_roots()
     if not roots:
@@ -811,6 +805,50 @@ active_processes_lock = threading.Lock()
 
 # Runtime browse roots (set by upload.py when starting web UI)
 _runtime_browse_roots: str | None = None
+_generated_queues: dict[str, str] = {}
+_generated_queues_lock = threading.Lock()
+
+
+def _is_generated_queue(path: str) -> bool:
+    key = os.path.normcase(os.path.realpath(path))
+    with _generated_queues_lock:
+        expected_hash = _generated_queues.get(key)
+    if expected_hash is None:
+        return False
+    try:
+        return secrets.compare_digest(hashlib.sha256(Path(path).read_bytes()).hexdigest(), expected_hash)
+    except OSError:
+        return False
+
+
+def _validate_execution_path(path: str, *, inspected_directories: InspectedDirectories | None = None) -> str:
+    if inspected_directories is None:
+        inspected_directories = set()
+    resolved = os.path.realpath(path)
+    if _is_generated_queue(resolved):
+        # Revalidate every content item, including folder descendants, at execution.
+        for number, line in enumerate(Path(resolved).read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                values = shlex.split(line)
+                validate_content_path(values[0], _get_browse_roots(), inspected_directories=inspected_directories)
+                _validate_upload_assistant_args(values[1:], inspected_directories=inspected_directories)
+            except (ValueError, IndexError) as error:
+                raise ValueError(f"Invalid queue line {number}: {error}") from error
+        return resolved
+    resolved = _resolve_user_path(path, require_exists=True, require_dir=False)
+    return validate_content_path(resolved, _get_browse_roots(), inspected_directories=inspected_directories)
+
+
+def _remove_generated_queue_file(key: str) -> None:
+    """Unlink only an issued queue entry directly inside the configured tmp dir."""
+    path = Path(key)
+    if (
+        path.name.startswith("webui_queue_")
+        and path.suffix == ".txt"
+        and os.path.normcase(os.path.realpath(path.parent)) == os.path.normcase(os.path.realpath(STATE_DIR / "tmp"))
+    ):
+        path.unlink(missing_ok=True)
+
 
 # Runtime flags and stored totp
 saved_totp_secret: str | None = None
@@ -1045,7 +1083,7 @@ def _token_is_valid(token: str) -> bool:
     return bool(info)
 
 
-def _validate_upload_assistant_args(args: Sequence[object]) -> list[str]:
+def _validate_upload_assistant_args(args: Sequence[object], *, inspected_directories: InspectedDirectories | None = None) -> list[str]:
     """Validate upload-assistant arguments before passing them as argv values.
 
     The WebUI launches the controller without a shell, so shell punctuation is
@@ -1064,6 +1102,7 @@ def _validate_upload_assistant_args(args: Sequence[object]) -> list[str]:
         if a == ".." or a == ".":
             raise ValueError("Invalid arg")
         safe_args.append(a)
+    validate_argument_paths(safe_args, _get_browse_roots(), inspected_directories=inspected_directories)
     return safe_args
 
 
@@ -2705,6 +2744,8 @@ class ConfigItem(TypedDict, total=False):
     help: list[str]
     subsection: str | bool
     override_fields: list[ConfigItem]
+    field_type: str
+    field_min: int
 
 
 class ConfigSection(TypedDict, total=False):
@@ -2754,6 +2795,7 @@ def _webui_auth_ok() -> bool:
 
 @app.before_request
 def _require_auth_for_webui():  # pyright: ignore[reportUnusedFunction]
+    """Enforce IP and authentication checks, recording rejected API credentials."""
     # Health endpoint can be used for orchestration checks.
     if request.path == "/api/health":
         return None
@@ -2806,6 +2848,8 @@ def _require_auth_for_webui():  # pyright: ignore[reportUnusedFunction]
             return None
         # If request accepts HTML (browser), redirect to login; else 401 for API clients
         if "text/html" in (_request_header("Accept") or ""):
+            if _request_header("Authorization"):
+                _handle_failed_auth(client_ip)
             return redirect(url_for("login_page"))
         _handle_failed_auth(client_ip)
         return jsonify({"error": "Authentication required", "success": False}), 401
@@ -3347,6 +3391,26 @@ _RELEASE_GROUP_OVERRIDE_FIELDS = (
     "tonemapped_header",
     "custom_signature",
 )
+_RELEASE_GROUP_BOOL_FIELDS = (
+    "episode_overview",
+    "add_logo",
+    "full_mediainfo",
+    "add_bluray_link",
+    "use_bluray_images",
+    "add_audio_spectrogram",
+    "add_dynamic_hdr_plot",
+    "hide_screenshot_header_if_only_section",
+)
+_RELEASE_GROUP_INT_FIELDS = (
+    "thumbnail_size",
+    "screens_per_row",
+    "logo_size",
+    "bluray_image_size",
+    "pack_thumb_size",
+    "multiScreens",
+)
+
+_RELEASE_GROUP_IMAGE_SIZE_FIELDS = {"thumbnail_size", "pack_thumb_size", "logo_size", "bluray_image_size"}
 
 
 def _is_release_group_override_path(path: list[str]) -> bool:
@@ -3368,8 +3432,24 @@ def _validate_release_group_overrides(value: object) -> None:
         seen.add(normalized_name)
         if not isinstance(fields, dict):
             raise ValueError(f"Overrides for {name} must be a dictionary.")
-        for field, text in fields.items():
-            if not isinstance(field, str) or not field or (text is not None and not isinstance(text, str)):
+        for field, field_val in fields.items():
+            if not isinstance(field, str) or not field:
+                raise ValueError(f"Overrides for {name} need non-empty field names.")
+            if field_val is None:
+                continue
+            if field in _RELEASE_GROUP_BOOL_FIELDS:
+                if isinstance(field_val, bool) or (isinstance(field_val, str) and field_val.strip().lower() in ("true", "false", "1", "0", "yes", "no", "on", "off")):
+                    continue
+                raise ValueError(f"{field} for {name} must be a boolean or null.")
+            if field in _RELEASE_GROUP_INT_FIELDS:
+                minimum = 1 if field in _RELEASE_GROUP_IMAGE_SIZE_FIELDS else 0
+                try:
+                    if isinstance(field_val, bool) or not isinstance(field_val, (str, int)) or int(field_val) < minimum:
+                        raise ValueError
+                except (ValueError, TypeError):  # fmt: skip
+                    raise ValueError(f"{field} for {name} must be an integer of at least {minimum}, or null.") from None
+                continue
+            if not isinstance(field_val, str):
                 raise ValueError(f"Overrides for {name} must contain text fields or null values.")
 
 
@@ -3435,7 +3515,20 @@ def _build_config_items(
                 "source": "config" if key in user_dict else "example",
                 "children": [],
                 "help": help_text or comments_map.get("DEFAULT/tag_overrides", []),
-                "override_fields": [{"key": field, "help": comments_map.get(f"DEFAULT/{field}", [])} for field in _RELEASE_GROUP_OVERRIDE_FIELDS],
+                "override_fields": [
+                    {
+                        "key": field,
+                        "field_type": field_type,
+                        "field_min": 1 if field in _RELEASE_GROUP_IMAGE_SIZE_FIELDS else 0,
+                        "help": comments_map.get(f"DEFAULT/{field}", []),
+                    }
+                    for fields, field_type in (
+                        (_RELEASE_GROUP_OVERRIDE_FIELDS, "text"),
+                        (_RELEASE_GROUP_BOOL_FIELDS, "boolean"),
+                        (_RELEASE_GROUP_INT_FIELDS, "number"),
+                    )
+                    for field in fields
+                ],
             }
         elif isinstance(example_value, Mapping) or isinstance(user_value, Mapping):
             example_value = _as_dict(example_value) or {}
@@ -3735,13 +3828,6 @@ def _resolve_user_path(
     require_dir: bool = False,
 ) -> str:
     roots = _get_browse_roots()
-    # Allow webui_queue files under tmp directory
-    if isinstance(user_path, str):
-        path_obj = Path(user_path)
-        if path_obj.name.startswith("webui_queue_") and path_obj.suffix == ".txt":
-            repo_tmp_dir = Path(__file__).resolve().parent.parent / "tmp"
-            if repo_tmp_dir.resolve().exists():
-                roots = [*roots, str(repo_tmp_dir.resolve())]
     if not roots:
         raise ValueError("Browsing is not configured")
 
@@ -3891,6 +3977,17 @@ def _resolve_user_path(
         raise ValueError("Not a directory")
 
     return safe_candidate
+
+
+def _is_hidden_browse_entry(path: Path) -> bool:
+    """Hide dotfiles and OS-maintained entries consistently in browse/search."""
+    if path.name.startswith(".") or path.name.casefold() in {"$recycle.bin", "system volume information"}:
+        return True
+    try:
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attributes & (stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_SYSTEM))
 
 
 def _resolve_browse_path(user_path: str | None) -> str:
@@ -4636,6 +4733,7 @@ def twofa_disable():
 
 
 @app.route("/api/browse_roots")
+@limiter.exempt
 def browse_roots():
     """Return configured browse roots"""
     roots = _get_browse_roots()
@@ -6101,6 +6199,7 @@ def api_tokens():
 
 
 @app.route("/api/browse")
+@limiter.limit("600 per minute", key_func=_rate_limit_key_func, override_defaults=True)
 def browse_path():
     """Browse filesystem paths"""
     requested: str = str(request.args.get("path", ""))
@@ -6154,10 +6253,9 @@ def browse_path():
 
             # codeql[py/path-injection]
             for item in sorted([p.name for p in Path(safe_path).iterdir()]):
-                # Skip hidden files
-                if item.startswith("."):
-                    continue
                 full_path = Path(safe_path) / item
+                if _is_hidden_browse_entry(full_path):
+                    continue
                 # Explicitly assert each resolved child path is safe. If the
                 # assertion fails for a specific entry, skip it rather than
                 # failing the whole browse operation.
@@ -6227,6 +6325,7 @@ def browse_path():
 
 
 @app.route("/api/browse_search")
+@limiter.limit("60 per minute", key_func=_rate_limit_key_func, override_defaults=True)
 def browse_search():
     """Search filesystem for files/folders matching a query string"""
     query = (request.args.get("q") or "").strip()
@@ -6285,8 +6384,8 @@ def browse_search():
                 continue
             try:
                 for dirpath, dirnames, filenames in os.walk(root_abs):
-                    # Skip hidden dirs
-                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                    # Prune system/hidden directories before os.walk enters them.
+                    dirnames[:] = [d for d in dirnames if not _is_hidden_browse_entry(Path(dirpath) / d)]
 
                     # Check dirs
                     for dirname in dirnames:
@@ -6321,9 +6420,9 @@ def browse_search():
 
                     # Check files
                     for filename in filenames:
-                        if filename.startswith("."):
-                            continue
                         if not name_matches(filename):
+                            continue
+                        if _is_hidden_browse_entry(Path(dirpath) / filename):
                             continue
                         if file_filter == "desc":
                             ext = Path(filename.lower()).suffix
@@ -6740,41 +6839,63 @@ def save_queue():
 
         if not items:
             return jsonify({"error": "No items provided", "success": False}), 400
+        if len(items) > MAX_UPLOAD_PATHS:
+            return jsonify({"error": f"Maximum {MAX_UPLOAD_PATHS} paths per upload", "success": False}), 400
 
         base_dir = STATE_DIR
         tmp_dir = base_dir / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
         filename = f"webui_queue_{int(time.time() * 1000)}_{secrets.token_hex(4)}.txt"
         file_path = tmp_dir / filename
 
         validated_items: list[tuple[str, list[str]]] = []
-        for item in items:
+        inspected_directories: InspectedDirectories = set()
+        for number, item in enumerate(items, 1):
             if not isinstance(item, dict):
-                continue
-            path = str(item.get("path", "")).strip()
-            args = str(item.get("args", "")).strip()
-            if not path:
-                continue
+                return jsonify({"error": f"Invalid queue item {number}", "success": False, "item": number}), 400
+            path = item.get("path")
+            args = item.get("args", "")
 
             try:
-                validated_path = _resolve_user_path(path, require_exists=True, require_dir=False)
-                validated_args = _validate_upload_assistant_args(shlex.split(args) if args else [])
+                if not isinstance(path, str) or not path.strip() or not isinstance(args, str):
+                    raise ValueError("Path and arguments must be strings; path cannot be empty")
+                validated_path = _validate_execution_path(path.strip(), inspected_directories=inspected_directories)
+                if _is_generated_queue(validated_path):
+                    raise ValueError("Nested queues are not allowed")
+                validated_args = _validate_upload_assistant_args(shlex.split(args) if args else [], inspected_directories=inspected_directories)
             except (ValueError, TypeError) as err:
-                return jsonify({"error": f"Invalid queue item: {err}", "success": False}), 400
+                return jsonify({"error": f"Invalid queue item {number}: {err}", "success": False, "item": number}), 400
             validated_items.append((validated_path, validated_args))
 
         if not validated_items:
             return jsonify({"error": "No valid items provided", "success": False}), 400
 
-        with file_path.open("w", encoding="utf-8") as f:
-            for validated_path, validated_args in validated_items:
-                line = f'"{validated_path}"'
-                if validated_args:
-                    line += f" {shlex.join(validated_args)}"
-                f.write(line + "\n")
+        if len(validated_items) == 1 and data.get("return_single_path") is True:
+            return jsonify({"success": True, "path": validated_items[0][0], "queued": False})
 
-        return jsonify({"success": True, "path": str(file_path)})
+        content = "".join(shlex.join([path, *args]) + "\n" for path, args in validated_items)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        with file_path.open("x", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        key = os.path.normcase(os.path.realpath(file_path))
+        evicted_key = None
+        with active_processes_lock, _generated_queues_lock:
+            # Bound abandoned queue registrations. Old files never become trusted
+            # merely because their names have the webui_queue_ prefix.
+            if len(_generated_queues) >= MAX_UPLOAD_PATHS:
+                active_queue_keys = {os.path.normcase(os.path.realpath(str(process.get("path", "")))) for process in active_processes.values()}
+                evicted_key = next((entry for entry in _generated_queues if entry not in active_queue_keys), None)
+                if evicted_key is None:
+                    file_path.unlink(missing_ok=True)
+                    return jsonify({"success": False, "error": "All queue slots are active; try again after an upload finishes"}), 429
+                _generated_queues.pop(evicted_key)
+            _generated_queues[key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if evicted_key is not None:
+            try:
+                _remove_generated_queue_file(evicted_key)
+            except OSError as error:
+                console.print(f"Could not remove expired WebUI queue: {error}", markup=False)
+
+        return jsonify({"success": True, "path": str(file_path), "queued": True})
 
     except Exception as e:
         console.print(f"Error saving queue: {e}", markup=False)
@@ -6866,16 +6987,6 @@ def execute_command():
         path = str(data.get("path", ""))
         args = str(data.get("args", ""))
         session_id = str(data.get("session_id", "default"))
-        # If a previous run for this session left state behind, attempt to
-        # terminate/cleanup it so the new execution starts with a clean slate.
-        with contextlib.suppress(Exception):
-            existing = active_processes.pop(session_id, None)
-            if existing:
-                proc = existing.get("process")
-                if proc and proc.poll() is None:
-                    with contextlib.suppress(Exception):
-                        _terminate_process_tree(proc)
-
         console.print(f"Execute request - Path: {path}, Args: {args}, Session: {session_id}", markup=False)
 
         if not path:
@@ -6884,7 +6995,7 @@ def execute_command():
         def generate():
             try:
                 # Build command to run upload.py directly
-                validated_path = _resolve_user_path(path, require_exists=True, require_dir=False)
+                validated_path = _validate_execution_path(path)
 
                 # Additional explicit assertion for static analysis: ensure the
                 # resolved path is within allowed browse roots and contains no
@@ -6899,23 +7010,28 @@ def execute_command():
                 upload_script = str(CODE_DIR / "upload.py")
                 command = [sys.executable, "-u", upload_script, validated_path]
 
-                process_state = _make_process_state(validated_path, args)
-                with active_processes_lock:
-                    active_processes[session_id] = process_state
-
                 # Add arguments if provided
                 if args:
-                    import shlex
-
                     parsed_args = shlex.split(args)
                     try:
                         validated_args = _validate_upload_assistant_args(parsed_args)
                     except ValueError as err:
                         console.print(f"Invalid execution arguments: {err}", markup=False)
-                        _discard_session_state(session_id, process_state)
                         yield f"data: {json.dumps({'type': 'error', 'data': 'Invalid execution arguments'})}\n\n"
                         return
                     command.extend(validated_args)
+
+                # Invalid requests must not terminate an existing session.
+                with active_processes_lock:
+                    existing = active_processes.pop(session_id, None)
+                if existing:
+                    proc = existing.get("process")
+                    if proc and proc.poll() is None:
+                        with contextlib.suppress(Exception):
+                            _terminate_process_tree(proc)
+                process_state = _make_process_state(validated_path, args)
+                with active_processes_lock:
+                    active_processes[session_id] = process_state
 
                 command_str = subprocess.list2cmdline(command)
                 console.print(f"Running: {command_str}", markup=False)
@@ -6926,6 +7042,18 @@ def execute_command():
                 # terminate its external workers as one process tree. Subprocess
                 # stdin supports the WebUI prompt flow.
                 env = _webui_subprocess_env()
+                env[ROOTS_ENV] = json.dumps(_get_browse_roots())
+                env.pop(QUEUE_ENV, None)
+                env.pop(QUEUE_HASH_ENV, None)
+                if Path(validated_path).suffix.lower() == ".txt":
+                    with _generated_queues_lock:
+                        queue_hash = _generated_queues.get(os.path.normcase(os.path.realpath(validated_path)))
+                    if queue_hash is None:
+                        _discard_session_state(session_id, process_state)
+                        yield f"data: {json.dumps({'type': 'error', 'data': 'WebUI queue expired; select the paths again'})}\n\n"
+                        return
+                    env[QUEUE_ENV] = validated_path
+                    env[QUEUE_HASH_ENV] = queue_hash
 
                 # Sanity-check the working directory used for the subprocess.
                 # `base_dir` is computed from the application `__file__`, but
@@ -7156,11 +7284,12 @@ def execute_command():
                 try:
                     if "validated_path" in locals() and validated_path:
                         p_obj = Path(validated_path)
-                        if p_obj.name.startswith("webui_queue_") and p_obj.suffix == ".txt":
-                            repo_tmp_dir = Path(__file__).resolve().parent.parent / "tmp"
-                            if p_obj.parent.resolve() == repo_tmp_dir.resolve() and p_obj.exists():
-                                p_obj.unlink()
-                                console.print(f"Cleaned up queue file: {p_obj.name}", markup=False)
+                        key = os.path.normcase(os.path.realpath(p_obj))
+                        with _generated_queues_lock:
+                            generated = _generated_queues.pop(key, None)
+                        if generated is not None:
+                            _remove_generated_queue_file(key)
+                            console.print(f"Cleaned up queue file: {p_obj.name}", markup=False)
                 except Exception as cleanup_err:
                     console.print(f"Failed to cleanup queue file: {cleanup_err}", markup=False)
 
