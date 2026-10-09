@@ -73,13 +73,13 @@ def _romanized_imdb_titles(meta: Meta) -> Iterator[str]:
 
 
 def select_aka(meta: Meta, title: str) -> str:
-    """Prefer a source AKA, using romanization when its script is non-Latin."""
+    """Prefer a source AKA, requiring Latin script or a romanized alias."""
     if meta.no_aka:
         return ""
     candidate = _first_distinct_title((meta.imdb_info.get("aka"), meta.original_title), title)
     prepared = _first_distinct_title((meta.retrieved_aka, meta.aka), title, latin_only=True) if meta.anime else ""
     if candidate and not _latin_title(candidate):
-        candidate = _first_distinct_title(_romanized_imdb_titles(meta), title, latin_only=True) or prepared or candidate
+        candidate = _first_distinct_title(_romanized_imdb_titles(meta), title, latin_only=True) or prepared
     selected = candidate or prepared
     return f"AKA {selected}" if selected else ""
 

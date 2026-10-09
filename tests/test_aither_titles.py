@@ -44,6 +44,20 @@ async def test_generic_release_names(meta, expected):
     assert meta.to_dict() == before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original,expected_aka', [
+    ('काल्पनिक शीर्षक', ''),
+    ('架空の題名THEサンプル', ''),
+    ('Exêmple fictif: Histôire imaginaire', ' AKA Exêmple fictif: Histôire imaginaire'),
+    ('Titre inventé naïf', ' AKA Titre inventé naïf'),
+    ('Exemple (Histoire héroïque)', ' AKA Exemple (Histoire héroïque)'),
+])
+async def test_aka_requires_latin_script(original, expected_aka):
+    meta = release('Example Title', original)
+    name = (await Aither(CONFIG).get_name(meta))['name']
+    assert name == f'Example Title{expected_aka} 2020 1080p WEB-DL DD+ 5.1 H.264-RGroup'
+
+
 @pytest.mark.parametrize('original,title,expected', [
     ('A title!', 'a TITLE', ''),
     ('The Example Documentary', 'The Example Documentary', ''),
@@ -56,7 +70,7 @@ def test_aka_equality(original, title, expected):
 
 def test_aka_fallback_and_romanized_alias():
     meta = release('English', '한국어', imdb_info={'aka': 'English'})
-    assert select_aka(meta, 'English') == 'AKA 한국어'
+    assert select_aka(meta, 'English') == ''
     meta.imdb_info['akas'] = [{'title': 'Hangug-eo', 'attributes': [{'text': 'romanized title'}]}]
     assert select_aka(meta, 'English') == 'AKA Hangug-eo'
     meta.no_aka = True
@@ -66,7 +80,7 @@ def test_aka_fallback_and_romanized_alias():
 @pytest.mark.parametrize('imdb_aka,original,prepared,anime,expected', [
     ('IMDb alternate', 'TMDB original', 'AKA Anime title', True, 'AKA IMDb alternate'),
     ('PRIMARY!', 'TMDB original', '', False, 'AKA TMDB original'),
-    ('한국어', 'TMDB original', '', False, 'AKA 한국어'),
+    ('한국어', 'TMDB original', '', False, ''),
     ('한국어', 'TMDB original', 'AKA Anime title', True, 'AKA Anime title'),
     ('Primary', 'PRIMARY!', 'AKA Anime title', True, 'AKA Anime title'),
     ('Primary', 'PRIMARY!', 'AKA Anime title', False, ''),
@@ -78,7 +92,7 @@ def test_aka_source_priority(imdb_aka, original, prepared, anime, expected):
     assert meta.to_dict() == before
 
 
-@pytest.mark.parametrize('language,expected', [('Korean', 'AKA Hangug-eo'), (None, 'AKA Hangug-eo'), ('Unknown language', 'AKA 한국어')])
+@pytest.mark.parametrize('language,expected', [('Korean', 'AKA Hangug-eo'), (None, 'AKA Hangug-eo'), ('Unknown language', '')])
 def test_romanization_filters_aliases_before_selection(language, expected):
     meta = release('Primary', '한국어', original_language='ko', imdb_info={'aka': 'Primary', 'akas': [
         None,
