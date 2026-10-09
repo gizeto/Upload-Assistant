@@ -58,6 +58,27 @@ async def test_aka_requires_latin_script(original, expected_aka):
     assert name == f'Example Title{expected_aka} 2020 1080p WEB-DL DD+ 5.1 H.264-RGroup'
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('primary,alternate,expected', [
+    ('Example Hero: Let A Story Begin', 'Example Hero', 'Example Hero: Let A Story Begin'),
+    ('Examples and Stories', 'Examples & Stories', 'Examples and Stories'),
+    ('The Example Character', 'example CHARACTER', 'The Example Character'),
+    ('Revisited: Example By Example', 'Example by Example', 'Revisited: Example By Example'),
+    ('Example Bird: Beginning', 'example bird - beginning of story', 'Example Bird: Beginning of story'),
+    ('Example Bird: Beginning', 'EXAMPLE BIRD / BEGINNING: More', 'Example Bird: Beginning: More'),
+    ('An Example & A Story', 'Example and Story', 'An Example & A Story'),
+    ('Example Storybook', 'Story', 'Example Storybook AKA Story'),
+    ('Example Bird', 'A Story About Example Bird', 'Example Bird AKA A Story About Example Bird'),
+    ('Example Bird', 'The Example Bird: More', 'Example Bird AKA The Example Bird: More'),
+])
+async def test_overlapping_aka_titles(primary, alternate, expected):
+    meta = release(primary, alternate)
+    before = meta.to_dict()
+    name = (await Aither(CONFIG).get_name(meta))['name']
+    assert name == f'{expected} 2020 1080p WEB-DL DD+ 5.1 H.264-RGroup'
+    assert meta.to_dict() == before
+
+
 @pytest.mark.parametrize('original,title,expected', [
     ('A title!', 'a TITLE', ''),
     ('The Example Documentary', 'The Example Documentary', ''),

@@ -14,7 +14,7 @@ from src.console import logger
 from src.meta import Meta
 from src.tmdb import get_tmdb_primary_title
 from src.trackers.common import Common
-from src.trackers.naming import select_aka
+from src.trackers.naming import merge_title_aka, select_aka
 from src.tvdb import TvdbData
 
 guessit_module: Any = cast(Any, guessit)
@@ -65,6 +65,7 @@ class NameManager:
         if use_tmdb_title and meta.category in ("MOVIE", "TV"):
             meta.title, meta.original_title = await get_tmdb_primary_title(meta, self.config)
             meta.aka = select_aka(meta, meta.title)
+            meta.title, meta.aka = merge_title_aka(meta.title, meta.aka)
 
         year = str(meta.year or "")
         if meta.category == "TV":

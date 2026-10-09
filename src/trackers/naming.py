@@ -84,6 +84,27 @@ def select_aka(meta: Meta, title: str) -> str:
     return f"AKA {selected}" if selected else ""
 
 
+def merge_title_aka(title: str, aka: str) -> tuple[str, str]:
+    if not aka:
+        return title, aka
+    alternate = aka.removeprefix("AKA ")
+
+    def words(value: str) -> list[str]:
+        return [word for word in re.findall(r"[^\W_]+", value.casefold()) if word not in ("a", "the", "and")]
+
+    primary_words, alternate_words = words(title), words(alternate)
+    if alternate_words and any(primary_words[i : i + len(alternate_words)] == alternate_words for i in range(len(primary_words))):
+        return title, ""
+
+    title_words = re.findall(r"[^\W_]+", title)
+    if title_words:
+        pattern = r"^[\W_]*" + r"[\W_]*".join(re.escape(word) for word in title_words) + r"(?![^\W_])"
+        match = re.match(pattern, alternate, flags=re.IGNORECASE)
+        if match:
+            return title + alternate[match.end() :], ""
+    return title, aka
+
+
 def add_incomplete_pack_marker(name: str, meta: Meta, tracker: str) -> str:
     """Mark confirmed incomplete packs without changing shared season metadata."""
     if tracker not in INCOMPLETE_PACK_TRACKERS or not getattr(meta, "season_pack_incomplete", False) or not meta.tv_pack or meta.category != "TV":
