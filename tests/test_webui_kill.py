@@ -174,16 +174,8 @@ def test_kill_preserves_session_io_and_can_retry_when_process_discovery_fails(mo
 
 
 def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -> None:
-    class RunningProcess:
-        pid = 1
-        stdin = io.StringIO()
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        def poll(self):
-            return None
-
-    process = RunningProcess()
+    process = Mock(pid=1, stdin=io.StringIO(), stdout=io.StringIO(), stderr=io.StringIO())
+    process.poll.return_value = None
     terminate = Mock(return_value=True)
     session_id = "sse-disconnect-test"
 
@@ -193,7 +185,6 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
     monkeypatch.setattr(server, "_assert_safe_resolved_path", lambda _: None)
     monkeypatch.setattr(server, "_validate_upload_assistant_args", lambda args: args)
     monkeypatch.setattr(server, "_spawn_webui_upload_process", lambda *_args: (process, "subprocess"))
-
     monkeypatch.setattr(server, "_terminate_process_tree", terminate)
 
     response = server.app.test_client().post("/api/execute", json={"path": str(tmp_path), "session_id": session_id}, buffered=False)

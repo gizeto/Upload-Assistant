@@ -859,11 +859,9 @@ def _cleanup_execution_queue(process_state: Mapping[str, object]) -> None:
     try:
         key = os.path.normcase(os.path.realpath(queue_path))
         with active_processes_lock, _generated_queues_lock:
-            if key in _queue_reservations.values():
+            if key not in _generated_queues or key in _queue_reservations.values():
                 return
             if any(state is not process_state and state.get("queue_path") == queue_path for state in active_processes.values()):
-                return
-            if key not in _generated_queues:
                 return
             _remove_generated_queue_file(key)
             _generated_queues.pop(key)
@@ -1562,11 +1560,7 @@ def set_execution_preview_target(session_id: str, expected_run_token: str, path:
 
 def _session_state_is_current(session_id: str, process_state: Mapping[str, object]) -> bool:
     with active_processes_lock:
-        current_state = active_processes.get(session_id)
-        if current_state is not process_state:
-            return False
-        run_token = process_state.get("run_token")
-        return bool(run_token and current_state.get("run_token") == run_token)
+        return active_processes.get(session_id) is process_state
 
 
 def _discard_session_state(session_id: str, process_state: Mapping[str, object]) -> None:
@@ -7149,12 +7143,7 @@ def execute_command():
                     process, process_mode = _spawn_webui_upload_process(command, Path(base_dir), env)
                     terminated = False
 
-                    process_state.update(
-                        {
-                            "mode": process_mode,
-                            "process": process,
-                        }
-                    )
+                    process_state.update(mode=process_mode, process=process)
 
                     def enqueue_output(output_type: str, char: str) -> None:
                         with contextlib.suppress(queue.ShutDown):
@@ -7178,47 +7167,25 @@ def execute_command():
                         stdout_thread = threading.Thread(target=read_stdout, daemon=True)
                         stderr_thread = None
                     else:
-                        # Thread to read stdout - stream raw output with ANSI codes
-                        def read_stdout():
-                            try:
-                                stdout = getattr(process, "stdout", None)
-                                if stdout is None:
-                                    return
-                                while True:
-                                    chunk = stdout.read(1)
-                                    if not chunk:
-                                        break
-                                    enqueue_output("stdout", chunk)
-                            except Exception as err:
-                                console.print(f"stdout read error: {err}", markup=False)
 
-                        # Thread to read stderr - stream raw output
-                        def read_stderr():
+                        def read_pipe(stream_name: str) -> None:
                             try:
-                                stderr = getattr(process, "stderr", None)
-                                if stderr is None:
+                                stream = getattr(process, stream_name, None)
+                                if stream is None:
                                     return
-                                while True:
-                                    chunk = stderr.read(1)
-                                    if not chunk:
-                                        break
-                                    enqueue_output("stderr", chunk)
+                                while chunk := stream.read(1):
+                                    enqueue_output(stream_name, chunk)
                             except Exception as err:
-                                console.print(f"stderr read error: {err}", markup=False)
+                                console.print(f"{stream_name} read error: {err}", markup=False)
 
-                        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-                        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                        stdout_thread = threading.Thread(target=read_pipe, args=("stdout",), daemon=True)
+                        stderr_thread = threading.Thread(target=read_pipe, args=("stderr",), daemon=True)
 
                     stdout_thread.start()
                     if stderr_thread is not None:
                         stderr_thread.start()
 
-                    # Record threads and output queue for debugging/cleanup
-                    with contextlib.suppress(Exception):
-                        if _session_state_is_current(session_id, process_state):
-                            process_state["stdout_thread"] = stdout_thread
-                            process_state["stderr_thread"] = stderr_thread
-                            process_state["output_queue"] = output_queue
+                    process_state.update(stdout_thread=stdout_thread, stderr_thread=stderr_thread, output_queue=output_queue)
 
                     if process_state.get("cancel_requested") or not _session_state_is_current(session_id, process_state):
                         raise RuntimeError("Execution session was cancelled or replaced before subprocess startup completed")
@@ -7228,20 +7195,17 @@ def execute_command():
                         markup=False,
                     )
 
-                    def _read_output(q: queue.Queue[tuple[str, str]]) -> tuple[bool, tuple[str, str] | None]:
-                        try:
-                            return True, q.get(timeout=0.1)
-                        except queue.Empty:
-                            return False, None
-
                     # Stream output as buffered chunks and always emit HTML fragments
                     # If we are running the upload as a subprocess, stream ANSI->HTML as before.
                     buffers: dict[str, str] = {"stdout": "", "stderr": ""}
 
                     while process.poll() is None or not output_queue.empty():
-                        has_output, output = _read_output(output_queue)
+                        try:
+                            output = output_queue.get(timeout=0.1)
+                        except queue.Empty:
+                            output = None
                         previous_prompt_type = str(process_state.get("input_type") or "text") if process_state.get("awaiting_input") else None
-                        if has_output and output is not None:
+                        if output is not None:
                             output_type, char = output
                             if output_type not in buffers:
                                 buffers[output_type] = ""
