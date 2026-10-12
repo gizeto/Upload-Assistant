@@ -932,6 +932,29 @@ async def get_tmdb_id(
     return tmdb_id, category
 
 
+async def _get_tmdb_main_data(
+    client: httpx.AsyncClient, tmdb_id: int, category: str | None, base_dir: str = "", config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Load cached movie or series details using the caller's HTTP client."""
+    cache = cache_for(base_dir, config)
+    key = json.dumps({"category": category, "id": tmdb_id}, sort_keys=True)
+    data = await cache.get("tmdb", "main", key)
+    if not is_cache_miss(data) and isinstance(data, dict):
+        return data
+
+    api_key = (config or {}).get("DEFAULT", {}).get("tmdb_api") or tmdb_api_key
+    if not api_key:
+        raise ValueError("TMDB API key is missing for metadata lookup")
+    endpoint = "movie" if category == "MOVIE" else "tv"
+    response = await client.get(f"{TMDB_BASE_URL}/{endpoint}/{tmdb_id}", params={"api_key": api_key, "language": "en-US"})
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Invalid TMDB metadata response")
+    await cache.set("tmdb", "main", key, data)
+    return data
+
+
 async def tmdb_other_meta(
     tmdb_id: int | None,
     path: str | None = None,
@@ -1029,24 +1052,15 @@ async def tmdb_other_meta(
     original_imdb_id = imdb_id
     tmdb_imdb_id = 0
 
-    cache = cache_for(base_dir, config)
     async with httpx.AsyncClient() as client:
         # Get main media details first (movie or TV show)
         main_url = f"{TMDB_BASE_URL}/{('movie' if category == 'MOVIE' else 'tv')}/{tmdb_id}"
-
-        cache_key = json.dumps({"category": category, "id": tmdb_id}, sort_keys=True)
-        cached_media = await cache.get("tmdb", "main", cache_key)
-        if not is_cache_miss(cached_media) and isinstance(cached_media, dict):
-            media_data = cached_media
-        else:
-            response = await client.get(main_url, params={"api_key": tmdb_api_key})
-            try:
-                response.raise_for_status()
-                media_data = typing_cast(dict[str, Any], response.json())
-            except Exception:
-                logger.info(f"[bold red]Failed to fetch media data: {response.status_code}[/bold red]")
-                return {}
-            await cache.set("tmdb", "main", cache_key, media_data)
+        try:
+            media_data = await _get_tmdb_main_data(client, tmdb_id, category, base_dir, config)
+        except (httpx.HTTPStatusError, ValueError) as error:
+            detail = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else str(error)
+            logger.info(f"[bold red]Failed to fetch media data: {detail}[/bold red]")
+            return {}
 
         logger.debug(f"[cyan]TMDB Response: {json.dumps(media_data, indent=2)[:1200]}...")
 
@@ -1294,6 +1308,7 @@ async def tmdb_other_meta(
     # Build the metadata dictionary
     return {
         "tmdb_adult_media": adult_media,
+        "tmdb_title": title,
         "title": title,
         "year": year,
         "release_date": release_date,
@@ -2139,3 +2154,18 @@ async def get_tmdb_localized_data(meta: Meta, data_type: str, language: str, app
     except httpx.RequestError as e:
         logger.info(f"[red]Request failed for {url}: {e}[/red]")
     return tmdb_data
+
+
+async def get_tmdb_primary_title(meta: Meta, config: dict[str, Any]) -> tuple[str, str]:
+    """Return recorded source titles, fetching them for legacy metadata."""
+    if meta.tmdb_title:
+        return meta.tmdb_title, meta.original_title
+    if not meta.tmdb_id or meta.category not in ("MOVIE", "TV"):
+        raise ValueError("Primary title lookup requires TMDB metadata")
+    async with httpx.AsyncClient(timeout=15) as client:
+        data = await _get_tmdb_main_data(client, meta.tmdb_id, meta.category, meta.base_dir, config)
+    field = "title" if meta.category == "MOVIE" else "name"
+    title = data.get(field)
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("TMDB primary title is missing")
+    return title.strip(), str(data.get(f"original_{field}") or title).strip()

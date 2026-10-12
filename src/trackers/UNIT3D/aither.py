@@ -3,10 +3,11 @@ import re
 from typing import Any
 
 from src.console import logger
+from src.get_name import NameManager
 from src.languages import languages_manager
 from src.meta import Meta
 from src.trackers.common import Common
-from src.trackers.naming import add_incomplete_pack_marker
+from src.trackers.naming import add_incomplete_pack_marker, get_release_year, remove_invalid_group_tag
 from src.trackers.UNIT3D import UNIT3D
 
 
@@ -112,38 +113,29 @@ class Aither(UNIT3D):
         return data
 
     async def get_name(self, meta: Meta):
+        if meta.manual_name is not None:
+            name = str(meta.manual_name).strip()
+            if meta.trump_reason == "exact_match":
+                name += " - TRUMP"
+            return {"name": add_incomplete_pack_marker(name, meta, self.tracker)}
         aither_name: str = meta.name
         resolution: str = meta.resolution
         video_codec: str = meta.video_codec
         video_encode: str = meta.video_encode
         name_type: str = meta.type or ""
         source: str = meta.source or ""
-        alt_title = meta.aka if not meta.no_aka else ""
 
-        year = str(meta.year) if meta.year is not None else ""
-        if meta.category == "TV":
-            year = str(meta.year) if (meta.year is not None and meta.search_year != "") else ""
-        manual_year_value = str(meta.manual_year)
-        if manual_year_value and int(manual_year_value) > 0:
-            year = manual_year_value
-        if meta.no_year:
-            year = ""
+        if meta.type and meta.category in ("MOVIE", "TV") and not meta.is_sports:
+            aither_name = await NameManager(self.config).render_tracker_name(meta, use_tmdb_title=True, tvdb_year=True, aka_before_year=True)
+        else:
+            year = get_release_year(meta)
+            alt_title = meta.aka if not meta.no_aka else ""
+            if alt_title and year:
+                aither_name = aither_name.replace(f"{year} {alt_title}", f"{alt_title} {year}", 1)
 
         if not meta.language_checked:
+            meta = meta.copy()
             await languages_manager.process_desc_language(meta, tracker=self.tracker)
-        audio_languages: list[str] = [] if not meta.audio_languages else meta.audio_languages
-        language_label_pattern = re.compile(rf"(?<!\S)MULTIPLE(?:\s+LANGUAGES)?(?=\s+{re.escape(resolution)}(?:\s|$))", re.IGNORECASE) if resolution else None
-        if audio_languages and not await languages_manager.has_english_language(audio_languages):
-            foreign_lang = "MULTIPLE LANGUAGES" if audio_languages[0].casefold() in ("multiple", "multiple languages") else audio_languages[0].upper()
-            existing_multiple_label = bool(language_label_pattern and language_label_pattern.search(aither_name))
-            if not existing_multiple_label and name_type == "REMUX" and source in ("PAL DVD", "NTSC DVD", "DVD"):
-                existing_multiple_label = bool(re.search(rf"(?<!\S)MULTIPLE(?:\s+LANGUAGES)?(?=\s+{re.escape(source)}(?:\s|$))", aither_name, re.IGNORECASE))
-            if foreign_lang != "MULTIPLE LANGUAGES" or not existing_multiple_label:
-                if name_type == "REMUX" and source in ("PAL DVD", "NTSC DVD", "DVD"):
-                    if year:
-                        aither_name = aither_name.replace(year, f"{year} {foreign_lang}", 1)
-                elif meta.is_disc != "BDMV":
-                    aither_name = aither_name.replace(meta.resolution, f"{foreign_lang} {meta.resolution}", 1)
 
         if name_type == "DVDRIP":
             source = "DVDRip"
@@ -160,14 +152,24 @@ class Aither(UNIT3D):
             aither_name = aither_name.replace((meta.audio), f"{video_codec} {meta.audio}", 1)
 
         elif name_type == "REMUX" and source in ("PAL DVD", "NTSC DVD", "DVD"):
-            aither_name = aither_name.replace(meta.source or "", f"{resolution} {meta.source}", 1)
-            aither_name = aither_name.replace((meta.audio), f"{video_codec} {meta.audio}", 1)
+            prefix, marker, suffix = aither_name.rpartition(f" {source} REMUX")
+            if marker:
+                aither_name = f"{prefix} {resolution}{marker} {video_codec}{suffix}"
+
+        audio_languages = meta.audio_languages or []
+        language_label_pattern = re.compile(rf"(?<!\S)MULTIPLE(?:\s+LANGUAGES)?(?=\s+{re.escape(resolution)}(?:\s|$))", re.IGNORECASE) if resolution else None
+        if audio_languages and resolution and meta.is_disc != "BDMV" and not await languages_manager.has_english_language(audio_languages):
+            foreign_lang = "MULTIPLE LANGUAGES" if audio_languages[0].casefold() in ("multiple", "multiple languages") else audio_languages[0].upper()
+            existing_multiple_label = bool(language_label_pattern and language_label_pattern.search(aither_name))
+            if foreign_lang != "MULTIPLE LANGUAGES" or not existing_multiple_label:
+                prefix, marker, suffix = aither_name.rpartition(f" {resolution}")
+                if marker:
+                    aither_name = f"{prefix} {foreign_lang}{marker}{suffix}"
+
+        aither_name = remove_invalid_group_tag(aither_name)
 
         if meta.trump_reason == "exact_match":
             aither_name = aither_name + " - TRUMP"
-
-        if alt_title and year:
-            aither_name = aither_name.replace(f"{year} {alt_title}", f"{alt_title} {year}", 1)
 
         if language_label_pattern:
             aither_name = language_label_pattern.sub("MULTIPLE LANGUAGES", aither_name)

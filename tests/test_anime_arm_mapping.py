@@ -186,6 +186,7 @@ def test_tmdb_metadata_uses_manual_season_and_preserves_manual_mal(tmp_path, man
                 manual_season=2,
                 mal_manual=manual_mal,
                 base_dir=str(tmp_path),
+                config={"DEFAULT": {"tmdb_api": "test-key"}},
             )
         )
     assert result["mal_id"] == (manual_mal or 123)

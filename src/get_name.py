@@ -12,7 +12,10 @@ import guessit
 from src.cleanup import cleanup_manager
 from src.console import logger
 from src.meta import Meta
+from src.tmdb import get_tmdb_primary_title
 from src.trackers.common import Common
+from src.trackers.naming import get_release_year, select_aka
+from src.tvdb import TvdbData
 
 guessit_module: Any = cast(Any, guessit)
 GuessitFn = Callable[[str, dict[str, Any] | None], dict[str, Any]]
@@ -45,13 +48,33 @@ class NameManager:
                 meta.distributor = distributor
             if region and "SKIPPED" not in region:
                 meta.region = region
+        name_notag, name, potential_missing = self.render_name(meta)
+        clean_name = await self.clean_filename(name)
+        return name_notag, name, clean_name, potential_missing
+
+    async def render_tracker_name(
+        self, meta: Meta, *, use_tmdb_title: bool = False, tvdb_year: bool = False, aka_before_year: bool = False
+    ) -> str:
+        """Render opt-in tracker naming rules without changing shared metadata."""
+        if meta.manual_name is not None:
+            return str(meta.manual_name).strip()
+        meta = meta.copy()
+        if use_tmdb_title and meta.category in ("MOVIE", "TV"):
+            meta.title, meta.original_title = await get_tmdb_primary_title(meta, self.config)
+            meta.aka = select_aka(meta, meta.title)
+
+        year_override = None
+        if tvdb_year and meta.category == "TV" and not meta.no_year and (meta.manual_year or 0) <= 0:
+            year_override = await TvdbData(self.config).get_naming_year(meta)
+        _, name, _ = self.render_name(meta, year_override=year_override, aka_before_year=aka_before_year)
+        return name
+
+    def render_name(self, meta: Meta, *, year_override: str | None = None, aka_before_year: bool = False) -> tuple[str, str, list[str]]:
+        """Format resolved metadata without prompts, I/O, or metadata changes."""
         type = str(meta.type).upper()
         title = meta.title
         alt_title = meta.aka
-        year = str(meta.year) if meta.year is not None else ""
-        manual_year_value = meta.manual_year
-        if manual_year_value is not None and manual_year_value > 0:
-            year = str(manual_year_value)
+        year = get_release_year(meta) if year_override is None else year_override
         resolution = meta.resolution
         if resolution == "OTHER":
             resolution = ""
@@ -91,16 +114,12 @@ class NameManager:
         if "hybrid" in edition.upper():
             edition = edition.replace("Hybrid", "").strip()
 
-        if meta.category == "TV":
-            year = str(meta.year) if (meta.year is not None and meta.search_year != "") else ""
-            if meta.manual_date:
-                # Ignore season and year for --daily flagged shows, just use manual date stored in episode_name
-                season = ""
-                episode = ""
+        if meta.category == "TV" and meta.manual_date:
+            # Daily releases use the episode title instead of season and episode numbers.
+            season = ""
+            episode = ""
         if meta.no_season is True:
             season = ""
-        if meta.no_year is True:
-            year = ""
         if meta.no_aka is True:
             alt_title = ""
         if meta.debug:
@@ -109,6 +128,10 @@ class NameManager:
             logger.debug(f"TYPE: {meta.type}")
             logger.debug("[cyan]get_name meta:")
             # logger.debug(meta)
+
+        if aka_before_year and alt_title:
+            title = f"{title} {alt_title}"
+            alt_title = ""
 
         # YAY NAMING FUN
         name = ""
@@ -209,8 +232,7 @@ class NameManager:
         tag_already_present = meta.category == "XXX" and bool(tag) and name_notag.casefold().endswith(tag.casefold())
         name = name_notag if meta.manual_name is not None or tag_already_present else name_notag + tag
 
-        clean_name = await self.clean_filename(name)
-        return name_notag, name, clean_name, potential_missing
+        return name_notag, name, potential_missing
 
     def extract_book_name(self, meta: Meta) -> str:
         comic = meta.comic

@@ -1,8 +1,16 @@
-"""Shared, tracker-specific release title markers."""
+"""Shared helpers for opt-in tracker naming rules."""
 
 import re
+import unicodedata
+from collections.abc import Iterable, Iterator
+from typing import Any
+
+import langcodes
+from unidecode import unidecode
 
 from src.meta import Meta
+
+INVALID_GROUP_TAGS = ("nogrp", "nogroup", "unknown", "unk")
 
 INCOMPLETE_PACK_TRACKERS = frozenset(
     {
@@ -25,6 +33,79 @@ INCOMPLETE_PACK_TRACKERS = frozenset(
         "YUSCENE",
     }
 )
+
+
+def get_release_year(meta: Meta) -> str:
+    """Apply shared year flags before formatting a release name."""
+    if meta.no_year:
+        return ""
+    if meta.manual_year and meta.manual_year > 0:
+        return str(meta.manual_year)
+    if meta.category == "TV" and meta.search_year == "":
+        return ""
+    return str(meta.year) if meta.year is not None else ""
+
+
+def remove_invalid_group_tag(name: str) -> str:
+    tags = "|".join(INVALID_GROUP_TAGS)
+    return re.sub(rf"\s*-\s*(?:{tags})\s*-?\s*$", "", name, flags=re.IGNORECASE)
+
+
+def title_key(title: str) -> str:
+    return "".join(char for char in unidecode(title).casefold() if char.isalnum())
+
+
+def _latin_title(title: str) -> bool:
+    return all("LATIN" in unicodedata.name(char, "") for char in title if char.isalpha())
+
+
+def _first_distinct_title(candidates: Iterable[Any], title: str, *, latin_only: bool = False) -> str:
+    primary_key = title_key(title)
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        candidate = re.sub(r"^AKA\s+", "", value.strip(), flags=re.IGNORECASE)
+        if candidate and title_key(candidate) != primary_key and (not latin_only or _latin_title(candidate)):
+            return candidate
+    return ""
+
+
+def _romanized_imdb_titles(meta: Meta) -> Iterator[str]:
+    aliases = meta.imdb_info.get("akas", [])
+    for alias in aliases if isinstance(aliases, list) else []:
+        if not isinstance(alias, dict):
+            continue
+        attributes = str(alias.get("attributes", "")).casefold()
+        if not any(marker in attributes for marker in ("romanized", "romanised", "transliterated")):
+            continue
+        language = alias.get("language")
+        if language and meta.original_language:
+            try:
+                if langcodes.find(str(language)).language != langcodes.get(meta.original_language).language:
+                    continue
+            except LookupError, ValueError:
+                continue
+        name = alias.get("title")
+        if isinstance(name, str):
+            yield name
+
+
+def select_aka(meta: Meta, title: str) -> str:
+    """Prefer a source AKA, requiring Latin script or a romanized alias."""
+    if meta.no_aka:
+        return ""
+    candidate = _first_distinct_title((meta.imdb_info.get("aka"), meta.original_title), title)
+    prepared = _first_distinct_title((meta.retrieved_aka, meta.aka), title, latin_only=True) if meta.anime else ""
+    if candidate and not _latin_title(candidate):
+        candidate = _first_distinct_title(_romanized_imdb_titles(meta), title, latin_only=True)
+    selected = candidate or prepared
+
+    def words(value: str) -> set[str]:
+        return set(re.findall(r"[^\W_]+", unidecode(value).casefold())) - {"a", "the", "and"}
+
+    if not selected or words(selected) <= words(title):
+        return ""
+    return f"AKA {selected}"
 
 
 def add_incomplete_pack_marker(name: str, meta: Meta, tracker: str) -> str:
