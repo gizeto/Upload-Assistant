@@ -226,6 +226,7 @@ def running_controller(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "STATE_DIR", state_dir)
     monkeypatch.setattr(server, "active_processes", {})
     monkeypatch.setattr(server, "_generated_queues", {})
+    monkeypatch.setattr(server, "_queue_reservations", {})
     monkeypatch.setattr(server, "_get_browse_roots", lambda: [str(tmp_path)])
     monkeypatch.setattr(server, "_get_bearer_from_header", lambda: None)
     monkeypatch.setattr(server, "_is_authenticated", lambda: True)
@@ -345,6 +346,46 @@ def test_detached_controller_discards_output_and_cleans_up_after_exit(running_co
             response.close()
 
 
+def test_replacement_keeps_queue_while_detached_controller_finishes(running_controller, monkeypatch):
+    client, content, process, root, spawn = running_controller
+    monkeypatch.setattr(server, "MAX_UPLOAD_PATHS", 1)
+    queue_response = client.post("/api/save_queue", json={"items": [{"path": str(content)}]})
+    queue_path = Path(queue_response.json["path"])
+    payload = {"path": str(queue_path), "session_id": "detached-replacement"}
+    response = client.post("/api/execute", json=payload, buffered=False)
+    try:
+        next(response.response)
+        next(response.response)
+        state = server.active_processes[payload["session_id"]]
+    finally:
+        response.close()
+
+    def finish_controller():
+        process.poll.return_value = 0
+        state["cleanup_thread"].join(timeout=2)
+        assert not state["cleanup_thread"].is_alive()
+        assert client.post("/api/save_queue", json={"items": [{"path": str(content)}]}).status_code == 429
+
+    root.children.side_effect = None
+    root.children.return_value = []
+    root.terminate.side_effect = finish_controller
+    replacement = Mock(stdin=io.StringIO(), stdout=io.StringIO(), stderr=io.StringIO())
+    replacement.poll.return_value = 0
+    replacement.wait.return_value = 0
+    spawn.return_value = (replacement, "subprocess")
+    response = client.post("/api/execute", json=payload, buffered=False)
+    try:
+        events = [json.loads(line[6:]) for line in response.get_data(as_text=True).splitlines() if line.startswith("data: ")]
+        assert not any(event["type"] == "error" for event in events)
+        assert {"type": "exit", "code": 0} in events
+        assert spawn.call_count == 2
+        assert not queue_path.exists()
+        assert not server._generated_queues
+        assert not server._queue_reservations
+    finally:
+        response.close()
+
+
 @pytest.mark.parametrize("discovery_error", [psutil.AccessDenied(pid=1234), RuntimeError("Discovery failed")], ids=["denied", "unexpected-error"])
 def test_failed_session_replacement_preserves_original_controller_and_queue(running_controller, discovery_error):
     client, content, process, root, spawn = running_controller
@@ -363,6 +404,7 @@ def test_failed_session_replacement_preserves_original_controller_and_queue(runn
         response.close()
         assert server.active_processes[session_id] is state
         spawn.assert_not_called()
+        assert not server._queue_reservations
         assert all(not stream.closed for stream in (process.stdin, process.stdout, process.stderr))
         assert queue_path.is_file()
         assert server._is_generated_queue(str(queue_path))

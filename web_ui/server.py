@@ -806,6 +806,7 @@ active_processes_lock = threading.Lock()
 # Runtime browse roots (set by upload.py when starting web UI)
 _runtime_browse_roots: str | None = None
 _generated_queues: dict[str, str] = {}
+_queue_reservations: dict[object, str] = {}
 _generated_queues_lock = threading.Lock()
 
 
@@ -858,6 +859,8 @@ def _cleanup_execution_queue(process_state: Mapping[str, object]) -> None:
     try:
         key = os.path.normcase(os.path.realpath(queue_path))
         with active_processes_lock, _generated_queues_lock:
+            if key in _queue_reservations.values():
+                return
             if any(state is not process_state and state.get("queue_path") == queue_path for state in active_processes.values()):
                 return
             if key not in _generated_queues:
@@ -6912,6 +6915,7 @@ def save_queue():
             # merely because their names have the webui_queue_ prefix.
             if len(_generated_queues) >= MAX_UPLOAD_PATHS:
                 active_queue_keys = {os.path.normcase(os.path.realpath(str(process.get("queue_path") or process.get("path", "")))) for process in active_processes.values()}
+                active_queue_keys.update(_queue_reservations.values())
                 evicted_key = next((entry for entry in _generated_queues if entry not in active_queue_keys), None)
                 if evicted_key is None:
                     file_path.unlink(missing_ok=True)
@@ -7055,23 +7059,30 @@ def execute_command():
                     command.extend(validated_args)
 
                 # Invalid requests must not terminate an existing session.
-                with active_processes_lock:
+                queue_reservation = object()
+                with active_processes_lock, _generated_queues_lock:
                     existing = active_processes.get(session_id)
-                if existing:
-                    proc = existing.get("process")
-                    if proc is None:
-                        yield f"data: {json.dumps({'type': 'error', 'data': 'Execution is still starting; try again after startup completes'})}\n\n"
-                        return
-                    if not _terminate_process_tree(proc):
-                        yield f"data: {json.dumps({'type': 'error', 'data': 'Failed to terminate the previous process tree'})}\n\n"
-                        return
-                    _close_webui_process_io(proc)
-                new_state = _make_process_state(validated_path, args)
-                with active_processes_lock:
-                    current_state = active_processes.get(session_id)
-                    if current_state is None or current_state is existing:
-                        process_state = new_state
-                        active_processes[session_id] = process_state
+                    if Path(validated_path).suffix.lower() == ".txt":
+                        _queue_reservations[queue_reservation] = os.path.normcase(os.path.realpath(validated_path))
+                try:
+                    if existing:
+                        proc = existing.get("process")
+                        if proc is None:
+                            yield f"data: {json.dumps({'type': 'error', 'data': 'Execution is still starting; try again after startup completes'})}\n\n"
+                            return
+                        if not _terminate_process_tree(proc):
+                            yield f"data: {json.dumps({'type': 'error', 'data': 'Failed to terminate the previous process tree'})}\n\n"
+                            return
+                        _close_webui_process_io(proc)
+                    new_state = _make_process_state(validated_path, args)
+                    with active_processes_lock:
+                        current_state = active_processes.get(session_id)
+                        if current_state is None or current_state is existing:
+                            process_state = new_state
+                            active_processes[session_id] = process_state
+                finally:
+                    with _generated_queues_lock:
+                        _queue_reservations.pop(queue_reservation, None)
                 if process_state is None:
                     yield f"data: {json.dumps({'type': 'error', 'data': 'Execution session changed; try again'})}\n\n"
                     return
