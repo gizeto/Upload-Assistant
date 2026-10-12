@@ -13,6 +13,7 @@ import cli_ui
 from src.cleanup import cleanup_manager
 from src.console import logger
 from src.exportmi import mi_resolution
+from src.get_source import detect_source
 from src.media_extensions import VIDEO_EXTENSIONS
 from src.meta import Meta
 
@@ -81,7 +82,6 @@ class VideoManager:
         return codecs.get(bdinfo_dict["video"][0]["codec"], "")
 
     async def get_video_encode(self, mi: Any, type: str, bdinfo: Any) -> tuple[str, str, bool, str]:
-        video_encode = ""
         codec = ""
         bit_depth = "0"
         has_encode_settings = False
@@ -100,7 +100,7 @@ class VideoManager:
             encoded_library_name = None
         if format in ("AV1", "VP9", "VC-1"):
             codec = format
-        elif type in ("ENCODE", "WEBRIP", "DVDRIP"):  # ENCODE or WEBRIP or DVDRIP
+        elif type in ("ENCODE", "WEBRIP", "DVDRIP", "OTHER"):
             if format == "AVC":
                 codec = "x264"
             elif format == "HEVC":
@@ -119,11 +119,11 @@ class VideoManager:
             if type == "HDTV" and has_encode_settings is True:
                 codec = codec.replace("H.", "x")
         profile = "Hi10P" if format_profile == "High 10" else ""
-        video_encode = f"{profile} {codec}"
         video_codec = format
         if video_codec == "MPEG Video":
             mi_dict = cast(dict[str, Any], mi)
             video_codec = f"MPEG-{mi_dict['media']['track'][1].get('Format_Version')}"
+        video_encode = video_codec if type == "OTHER" and not codec else f"{profile} {codec}"
         return video_encode, video_codec, has_encode_settings, bit_depth
 
     async def get_video(self, videoloc: str, sorted_filelist: bool = False) -> tuple[str, list[str]]:
@@ -307,24 +307,29 @@ class VideoManager:
 
     async def get_type(self, video: str, _scene: bool, is_disc: str, meta: Meta) -> str:
         if meta.manual_type:
-            type = meta.manual_type
-        else:
-            filename = Path(video).name.lower()
-            if "remux" in filename:
-                type = "REMUX"
-            elif any(word in filename for word in [" web ", ".web.", "web-dl", "webdl"]):
-                type = "WEBDL"
-            elif "webrip" in filename:
-                type = "WEBRIP"
-            elif "hdtv" in filename:
-                type = "HDTV"
-            elif is_disc:
-                type = "DISC"
-            elif "dvdrip" in filename:
-                type = "DVDRIP"
-            else:
-                type = "WEBDL" if meta.category == "XXX" else "ENCODE"
-        return type
+            return meta.manual_type
+        filename = Path(video).name.lower()
+        if "remux" in filename:
+            return "REMUX"
+        if any(word in filename for word in [" web ", ".web.", "web-dl", "webdl"]):
+            return "WEBDL"
+        if "webrip" in filename:
+            return "WEBRIP"
+        if "hdtv" in filename:
+            return "HDTV"
+        if is_disc:
+            return "DISC"
+        if "dvdrip" in filename:
+            return "DVDRIP"
+
+        source = await detect_source(video, meta, meta.path or "")
+        if source in ("TV", "SDTV", "VHS", "TVRip", "VHSRip"):
+            return "OTHER"
+        if meta.category == "XXX":
+            return "WEBDL"
+        if not source:
+            return "OTHER"
+        return "DVDRIP" if source == "DVD" else "ENCODE"
 
     async def is_3d(self, bdinfo: Any | None) -> str:
         if bdinfo is not None:

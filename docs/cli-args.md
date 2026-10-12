@@ -93,9 +93,10 @@ If you pass a `.txt` file as the main positional input path (without specifying 
 ### Category / type / source / resolution
 
 - `-c`, `--category {movie,tv,sports,fanres,book,game,music,xxx}`: Override the category.
-- `-t`, `--type {disc,remux,encode,webdl,web-dl,webrip,hdtv,dvdrip}`: Override release type.
+- `-t`, `--type {disc,remux,encode,webdl,web-dl,webrip,hdtv,dvdrip,other}`: Override release type.
   - Stored as uppercase with `-` removed (e.g. `web-dl` → `WEBDL`).
-- `--source {Blu-ray,BluRay,DVD,DVD5,DVD9,HDDVD,WEB,HDTV,UHDTV,LaserDisc,DCP}`: Override the source string.
+- `--source {Blu-ray,BluRay,DVD,DVD5,DVD9,HDDVD,WEB,HDTV,UHDTV,SDTV,TVRip,VHSRip,LaserDisc,DCP}`: Override the source string.
+  - If no source is detected, resolutions below 720p default to `OTHER` with no source label; 720p and above, or unknown resolutions, default to BluRay / `ENCODE`. Explicit release types and sources take precedence.
 - `-res`, `--resolution {2160p,1080p,1080i,720p,576p,576i,480p,480i,8640p,4320p,other}`: Override the resolution.
 
 ### External IDs

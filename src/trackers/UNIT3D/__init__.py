@@ -235,6 +235,7 @@ class UNIT3D:
             "HDTV": "6",
             "ENCODE": "3",
             "DVDRIP": "3",
+            "OTHER": "7",
         }
         if mapping_only:
             return type_id

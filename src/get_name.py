@@ -53,7 +53,7 @@ class NameManager:
         if manual_year_value is not None and manual_year_value > 0:
             year = str(manual_year_value)
         resolution = meta.resolution
-        if resolution == "OTHER":
+        if resolution.upper() == "OTHER":
             resolution = ""
         audio = meta.audio
         hardcoded_subs = "HC" if meta.hardcoded_subs else ""
@@ -64,7 +64,7 @@ class NameManager:
         repack = meta.repack
         three_d = meta.three_d
         tag = meta.tag or ""
-        source = str(meta.source)
+        source = meta.source or ""
         uhd = str(meta.uhd)
         hdr = meta.hdr
         hybrid = "Hybrid" if meta.webdv else ""
@@ -135,7 +135,7 @@ class NameManager:
             elif type == "REMUX" and source in ("PAL DVD", "NTSC DVD", "DVD"):  # DVD Remux
                 name = f"{title} {alt_title} {year} {edition} {repack} {source} REMUX  {audio}"
                 potential_missing = ["edition", "description"]
-            elif type == "ENCODE":  # Encode
+            elif type in ("ENCODE", "OTHER"):
                 name = f"{title} {alt_title} {year} {edition} {hybrid} {repack} {resolution} {uhd} {source} {audio} {hdr} {video_encode}"
                 potential_missing = ["edition", "description"]
             elif type == "WEBDL":  # WEB-DL
@@ -169,7 +169,7 @@ class NameManager:
             elif type == "REMUX" and source in ("PAL DVD", "NTSC DVD", "DVD"):  # DVD Remux
                 name = f"{title} {year} {alt_title} {season}{episode} {episode_title} {part} {edition} {repack} {source} REMUX {audio}"  # SOURCE
                 potential_missing = ["edition", "description"]
-            elif type == "ENCODE":  # Encode
+            elif type in ("ENCODE", "OTHER"):
                 name = f"{title} {year} {alt_title} {season}{episode} {episode_title} {part} {edition} {hybrid} {repack} {resolution} {uhd} {source} {audio} {hdr} {video_encode}"  # SOURCE
                 potential_missing = ["edition", "description"]
             elif type == "WEBDL":  # WEB-DL
@@ -182,7 +182,7 @@ class NameManager:
                 name = f"{title} {year} {alt_title} {season}{episode} {episode_title} {part} {edition} {repack} {resolution} {source} {audio} {video_encode}"
                 potential_missing = []
             elif type == "DVDRIP":
-                name = f"{title} {year} {alt_title} {season} {source} DVDRip {audio} {video_encode}"
+                name = f"{title} {year} {alt_title} {season}{episode} {episode_title} {part} {source} DVDRip {audio} {video_encode}"
                 potential_missing = []
         elif meta.category == "BOOK":
             name = self.extract_book_name(meta)

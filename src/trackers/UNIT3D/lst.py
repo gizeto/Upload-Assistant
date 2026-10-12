@@ -101,6 +101,9 @@ class LST(UNIT3D):
         if isinstance(resolved_type, str):
             resolved_type = resolved_type.upper().strip().lstrip(".")
 
+        if not media_type and meta.category in ("MOVIE", "TV") and resolved_type == "OTHER" and (meta.source or "").upper() == "SDTV":
+            resolved_type = "SDTV"
+
         val = type_id.get(resolved_type or "", "0")
         if meta.category == "BOOK" and resolved_type not in type_id:
             val = "15"

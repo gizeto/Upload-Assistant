@@ -19,6 +19,29 @@ def _category(meta: Meta, **kwargs: object) -> dict[str, str]:
     return asyncio.run(Aither(config).get_category_id(meta, **kwargs))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["TVRip", ""])
+async def test_aither_other_release_upload_preserves_name_and_type(monkeypatch, source):
+    tracker = Aither({"DEFAULT": {}, "TRACKERS": {"AITHER": {}}})
+    source_label = f"{source} " if source else ""
+    release_name = f"Example Movie 1996 480p {source_label}AAC 2.0 x264-GROUP"
+    meta = Meta(
+        category="MOVIE", type="OTHER", name=release_name, year=1996,
+        resolution="480p", source=source, audio="AAC 2.0", video_codec="AVC", video_encode="x264",
+        language_checked=True,
+    )
+    for method in ("get_description", "get_mediainfo", "get_bdinfo"):
+        monkeypatch.setattr(tracker, method, AsyncMock(return_value={}))
+
+    data = await tracker.get_data(meta)
+
+    assert data["name"] == release_name
+    assert data["type_id"] == "7"
+    assert data["resolution_id"] == "8"
+    assert (await tracker.get_type_id(meta, mapping_only=True))["OTHER"] == "7"
+    assert (await tracker.get_type_id(meta, reverse=True))["7"] == "OTHER"
+
+
 def test_aither_uses_sports_category_for_detected_sports() -> None:
     assert _category(Meta(category="MOVIE", is_sports=True)) == {"category_id": "9"}
     assert _category(Meta(category="TV", is_sports=True)) == {"category_id": "9"}

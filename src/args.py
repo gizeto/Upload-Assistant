@@ -343,6 +343,7 @@ class Args:
                 "webrip": "Web-Rip (re-encoded)",
                 "hdtv": "HDTV Capture",
                 "dvdrip": "DVD Rip",
+                "other": "Other Release Type",
             }
         )
 
@@ -356,6 +357,9 @@ class Args:
                 "WEB": "Web Release",
                 "HDTV": "HDTV Broadcast",
                 "UHDTV": "UHDTV Broadcast",
+                "SDTV": "SDTV Broadcast",
+                "TVRip": "TV Rip",
+                "VHSRip": "VHS Rip",
                 "LaserDisc": "LaserDisc",
                 "DCP": "Digital Cinema Package",
             }
@@ -531,8 +535,8 @@ class Args:
             "--type",
             nargs=1,
             required=False,
-            help="Type [DISC, REMUX, ENCODE, WEBDL, WEBRIP, HDTV, DVDRIP]",
-            choices=["disc", "remux", "encode", "webdl", "web-dl", "webrip", "hdtv", "dvdrip"],
+            help="Type [DISC, REMUX, ENCODE, WEBDL, WEBRIP, HDTV, DVDRIP, OTHER]",
+            choices=["disc", "remux", "encode", "webdl", "web-dl", "webrip", "hdtv", "dvdrip", "other"],
             dest="manual_type",
         )
         action_t.completer = type_completer
@@ -540,8 +544,8 @@ class Args:
             "--source",
             nargs=1,
             required=False,
-            help="Source [Blu-ray, BluRay, DVD, DVD5, DVD9, HDDVD, WEB, HDTV, UHDTV, LaserDisc, DCP]",
-            choices=["Blu-ray", "BluRay", "DVD", "DVD5", "DVD9", "HDDVD", "WEB", "HDTV", "UHDTV", "LaserDisc", "DCP"],
+            help="Source [Blu-ray, BluRay, DVD, DVD5, DVD9, HDDVD, WEB, HDTV, UHDTV, SDTV, TVRip, VHSRip, LaserDisc, DCP]",
+            choices=["Blu-ray", "BluRay", "DVD", "DVD5", "DVD9", "HDDVD", "WEB", "HDTV", "UHDTV", "SDTV", "TVRip", "VHSRip", "LaserDisc", "DCP"],
             dest="manual_source",
         )
         action_source.completer = source_completer

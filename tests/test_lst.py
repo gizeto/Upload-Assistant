@@ -1,9 +1,63 @@
 """Regression tests for LST-specific upload payloads."""
 
 import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
 
 from src.meta import Meta
 from src.trackers.UNIT3D.lst import LST
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["MOVIE", "TV"])
+@pytest.mark.parametrize("source,type_id", [
+    ("SDTV", "16"),
+    ("TVRip", "15"),
+    ("VHSRip", "15"),
+    ("", "15"),
+])
+async def test_lst_capture_upload_automatically_uses_correct_type(monkeypatch, category, source, type_id):
+    episode = " S01E02" if category == "TV" else ""
+    source_label = f"{source} " if source else ""
+    release_name = f"Example Title 1996{episode} 480p {source_label}AAC 2.0 x264-GROUP"
+    meta = Meta(
+        category=category, type="OTHER", source=source, name=release_name, resolution="480p",
+    )
+    tracker = LST({"DEFAULT": {}, "TRACKERS": {"LST": {}}})
+    for method in ("get_description", "get_mediainfo", "get_bdinfo"):
+        monkeypatch.setattr(tracker, method, AsyncMock(return_value={}))
+
+    data = await tracker.get_data(meta)
+
+    assert data["name"] == release_name
+    assert data["type_id"] == type_id
+    assert data["resolution_id"] == "8"
+    assert meta.type == "OTHER"
+
+
+@pytest.mark.asyncio
+async def test_lst_sdtv_mapping_preserves_explicit_type():
+    meta = Meta(category="TV", type="OTHER", source="SDTV")
+    tracker = LST({"DEFAULT": {}, "TRACKERS": {"LST": {}}})
+
+    assert (await tracker.get_type_id(meta, reverse=True))["16"] == "SDTV"
+    assert (await tracker.get_type_id(meta, mapping_only=True))["SDTV"] == "16"
+    assert await tracker.get_type_id(meta, media_type="OTHER") == {"type_id": "15"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category,release_type,source,expected", [
+    ("TV", "OTHER", "sdtv", "16"),
+    ("MOVIE", "ENCODE", "SDTV", "3"),
+    ("MOVIE", "HDTV", "SDTV", "6"),
+    ("MUSIC", "OTHER", "SDTV", "15"),
+])
+async def test_lst_sdtv_selection_preserves_other_types(category, release_type, source, expected):
+    meta = Meta(category=category, type=release_type, source=source)
+    tracker = LST({"DEFAULT": {}, "TRACKERS": {"LST": {}}})
+
+    assert await tracker.get_type_id(meta) == {"type_id": expected}
 
 
 def test_lst_music_payload_includes_discogs_release_and_master_ids():

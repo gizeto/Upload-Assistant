@@ -52,11 +52,11 @@ class Unit3dTemplate(UNIT3D):  # EDIT 'Unit3dTemplate' AS ABBREVIATED TRACKER NA
         reverse: bool = False,
         mapping_only: bool = False,
     ) -> dict[str, str]:
-        type_id = {"DISC": "1", "REMUX": "2", "WEBDL": "4", "WEBRIP": "5", "HDTV": "6", "ENCODE": "3", "DVDRIP": "3"}
+        type_id = {"DISC": "1", "REMUX": "2", "WEBDL": "4", "WEBRIP": "5", "HDTV": "6", "ENCODE": "3", "DVDRIP": "3", "OTHER": "7"}
         if mapping_only:
             return type_id
         if reverse:
-            return {"1": "DISC", "2": "REMUX", "3": "ENCODE", "4": "WEBDL", "5": "WEBRIP", "6": "HDTV"}
+            return {"1": "DISC", "2": "REMUX", "3": "ENCODE", "4": "WEBDL", "5": "WEBRIP", "6": "HDTV", "7": "OTHER"}
         type_value = type if type is not None and type != "" else meta.type or ""
         return {"type_id": type_id.get(type_value, "0")}
 
