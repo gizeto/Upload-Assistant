@@ -7408,7 +7408,8 @@ def kill_process():
         try:
             terminated = _terminate_process_tree(process)
 
-            _close_webui_process_io(process)
+            if terminated:
+                _close_webui_process_io(process)
 
         finally:
             # Keep the session available for another Kill attempt if the

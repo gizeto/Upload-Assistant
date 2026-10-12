@@ -118,28 +118,56 @@ def test_terminate_process_tree_keeps_controller_when_discovery_fails(monkeypatc
     process.wait.assert_not_called()
 
 
-def test_kill_keeps_session_when_process_tree_termination_fails(monkeypatch) -> None:
-    process = object()
+@pytest.mark.parametrize(
+    "discovery_error",
+    [psutil.AccessDenied(pid=1234), PermissionError("Process discovery is not permitted"), OSError("Process discovery failed")],
+    ids=["access-denied", "permission-error", "os-error"],
+)
+def test_kill_preserves_session_io_and_can_retry_when_process_discovery_fails(monkeypatch, discovery_error) -> None:
+    process = Mock(pid=1234, stdin=io.StringIO(), stdout=io.StringIO(), stderr=io.StringIO())
+    process.poll.return_value = None
+    root = Mock()
+    root.children.side_effect = discovery_error
     session_id = "failed-kill-test"
 
     monkeypatch.setattr(server, "_get_bearer_from_header", lambda: None)
     monkeypatch.setattr(server, "_is_authenticated", lambda: True)
     monkeypatch.setattr(server, "_verify_csrf_header", lambda: True)
     monkeypatch.setattr(server, "_verify_same_origin", lambda: True)
-    monkeypatch.setattr(server, "_terminate_process_tree", lambda _: False)
-    monkeypatch.setattr(server, "_close_webui_process_io", lambda _: None)
+    monkeypatch.setattr(server.psutil, "Process", Mock(return_value=root))
+    monkeypatch.setattr(server.psutil, "wait_procs", Mock(return_value=([root], [])))
     with server.active_processes_lock:
         server.active_processes[session_id] = {"mode": "subprocess", "process": process}
 
     try:
-        response = server.app.test_client().post("/api/kill", json={"session_id": session_id})
+        client = server.app.test_client()
+        response = client.post("/api/kill", json={"session_id": session_id})
 
         assert response.status_code == 500
         assert response.get_json() == {"error": "Failed to terminate process tree", "success": False}
         assert server.active_processes[session_id]["process"] is process
+        root.terminate.assert_not_called()
+        assert all(not stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+
+        input_response = client.post("/api/input", json={"session_id": session_id, "input": "yes"})
+        assert input_response.status_code == 200
+        assert process.stdin.getvalue() == "yes\n"
+
+        root.children.side_effect = None
+        root.children.return_value = []
+        process.poll.side_effect = [None, 0]
+        retry_response = client.post("/api/kill", json={"session_id": session_id})
+
+        assert retry_response.status_code == 200
+        assert retry_response.get_json() == {"success": True, "message": "Process terminated"}
+        root.terminate.assert_called_once()
+        assert session_id not in server.active_processes
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
     finally:
         with server.active_processes_lock:
             server.active_processes.pop(session_id, None)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
 
 
 def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -> None:
