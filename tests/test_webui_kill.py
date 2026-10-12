@@ -183,7 +183,7 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
             return None
 
     process = RunningProcess()
-    terminated_processes = []
+    terminate = Mock(return_value=True)
     session_id = "sse-disconnect-test"
 
     monkeypatch.setattr(server, "_is_authenticated", lambda: True)
@@ -193,10 +193,6 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
     monkeypatch.setattr(server, "_validate_upload_assistant_args", lambda args: args)
     monkeypatch.setattr(server, "_spawn_webui_upload_process", lambda *_args: (process, "subprocess"))
 
-    def terminate(process):
-        terminated_processes.append(process)
-        return True
-
     monkeypatch.setattr(server, "_terminate_process_tree", terminate)
 
     response = server.app.test_client().post("/api/execute", json={"path": str(tmp_path), "session_id": session_id}, buffered=False)
@@ -205,7 +201,7 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
         next(response.response)  # Starts the controller, then emits a keepalive.
         response.close()
 
-        assert terminated_processes == [process]
+        terminate.assert_called_once_with(process)
         assert session_id not in server.active_processes
         assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
     finally:
@@ -243,6 +239,26 @@ def running_controller(tmp_path, monkeypatch):
 
     for stream in (process.stdin, process.stdout, process.stderr):
         stream.close()
+
+
+def test_queue_cleanup_can_retry_after_file_removal_fails(running_controller, monkeypatch):
+    client, content, _, _, _ = running_controller
+    queue_response = client.post("/api/save_queue", json={"items": [{"path": str(content)}]})
+    queue_path = Path(queue_response.json["path"])
+    state = server._make_process_state(str(queue_path), "")
+    remove_queue = server._remove_generated_queue_file
+    monkeypatch.setattr(server, "_remove_generated_queue_file", Mock(side_effect=PermissionError("Queue file is busy")))
+
+    server._cleanup_execution_queue(state)
+
+    assert queue_path.is_file()
+    assert server._is_generated_queue(str(queue_path))
+
+    monkeypatch.setattr(server, "_remove_generated_queue_file", remove_queue)
+    server._cleanup_execution_queue(state)
+
+    assert not queue_path.exists()
+    assert not server._generated_queues
 
 
 @pytest.mark.parametrize("stream_error", [False, True], ids=["disconnect", "stream-error"])

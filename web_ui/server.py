@@ -860,10 +860,11 @@ def _cleanup_execution_queue(process_state: Mapping[str, object]) -> None:
         with active_processes_lock, _generated_queues_lock:
             if any(state is not process_state and state.get("queue_path") == queue_path for state in active_processes.values()):
                 return
-            generated = _generated_queues.pop(key, None)
-        if generated is not None:
+            if key not in _generated_queues:
+                return
             _remove_generated_queue_file(key)
-            console.print(f"Cleaned up queue file: {Path(queue_path).name}", markup=False)
+            _generated_queues.pop(key)
+        console.print(f"Cleaned up queue file: {Path(queue_path).name}", markup=False)
     except OSError as error:
         console.print(f"Failed to cleanup queue file: {error}", markup=False)
 
@@ -1567,11 +1568,7 @@ def _session_state_is_current(session_id: str, process_state: Mapping[str, objec
 
 def _discard_session_state(session_id: str, process_state: Mapping[str, object]) -> None:
     with active_processes_lock:
-        current_state = active_processes.get(session_id)
-        if current_state is not process_state:
-            return
-        run_token = process_state.get("run_token")
-        if run_token and current_state.get("run_token") == run_token:
+        if active_processes.get(session_id) is process_state:
             active_processes.pop(session_id, None)
 
 
@@ -7412,51 +7409,29 @@ def kill_process():
             if not _verify_csrf_header() or not _verify_same_origin():
                 return jsonify({"error": "CSRF/Origin validation failed", "success": False}), 403
 
-        if session_id not in active_processes:
-            return jsonify({"error": "No active process", "success": False}), 404
+        with active_processes_lock:
+            process_info = active_processes.get(session_id)
+            if process_info is None:
+                return jsonify({"error": "No active process", "success": False}), 404
 
-        process_info = active_processes[session_id]
-        # Retrieve subprocess handle
-        process = process_info.get("process")
-        if process is None:
-            # Kill can race with startup after the session has been registered
-            # but before Popen returns. Keep tracking until the launcher can
-            # confirm cancellation or terminate a controller that did start.
-            with active_processes_lock:
-                if active_processes.get(session_id) is process_info:
-                    process_info["cancel_requested"] = True
-            return jsonify({"success": True, "message": "Execution startup cancelled"})
+            process = process_info.get("process")
+            if process is None:
+                # Keep tracking until the launcher confirms cancellation or
+                # terminates a controller that starts after this request.
+                process_info["cancel_requested"] = True
+                return jsonify({"success": True, "message": "Execution startup cancelled"})
 
-        terminated = False
-        try:
-            terminated = _terminate_process_tree(process)
-
-            if terminated:
-                _close_webui_process_io(process)
-
-        finally:
-            # Keep the session available for another Kill attempt if the
-            # process tree could not be terminated.
-            # Attempt to join reader threads if present
-            with contextlib.suppress(Exception):
-                info = active_processes.get(session_id, {})
-                stdout_t = info.get("stdout_thread")
-                stderr_t = info.get("stderr_thread")
-                if isinstance(stdout_t, threading.Thread):
-                    console.print(f"Joining stdout thread for session {session_id}", markup=False)
-                    stdout_t.join(timeout=1)
-                if isinstance(stderr_t, threading.Thread):
-                    console.print(f"Joining stderr thread for session {session_id}", markup=False)
-                    stderr_t.join(timeout=1)
-
-            if terminated:
-                with active_processes_lock:
-                    if active_processes.get(session_id) is process_info:
-                        active_processes.pop(session_id, None)
-                _cleanup_execution_queue(process_info)
-
-        if not terminated:
+        if not _terminate_process_tree(process):
             return jsonify({"error": "Failed to terminate process tree", "success": False}), 500
+
+        _close_webui_process_io(process)
+        for name in ("stdout_thread", "stderr_thread"):
+            reader_thread = process_info.get(name)
+            if isinstance(reader_thread, threading.Thread):
+                with contextlib.suppress(Exception):
+                    reader_thread.join(timeout=1)
+        _discard_session_state(session_id, process_info)
+        _cleanup_execution_queue(process_info)
 
         console.print(f"Process killed for session {session_id}", markup=False)
         console.print(f"Post-kill snapshot: {_debug_process_snapshot(session_id)}", markup=False)
