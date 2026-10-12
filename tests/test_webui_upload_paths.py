@@ -208,7 +208,12 @@ def test_valid_execute_replaces_running_session(workspace, monkeypatch):
     terminated = []
     session = "replace-valid-test"
     server.active_processes[session] = {"process": running}
-    monkeypatch.setattr(server, "_terminate_process_tree", terminated.append)
+
+    def terminate(process):
+        terminated.append(process)
+        return True
+
+    monkeypatch.setattr(server, "_terminate_process_tree", terminate)
     monkeypatch.setattr(server, "_spawn_webui_upload_process", lambda *_args: (CompletedProcess(), "subprocess"))
     response = client.post("/api/execute", json={"path": str(first), "session_id": session})
     try:

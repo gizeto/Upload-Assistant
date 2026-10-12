@@ -1,9 +1,11 @@
 # ruff: noqa: S101, S603
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import Mock
 
 import psutil
@@ -190,8 +192,12 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
     monkeypatch.setattr(server, "_assert_safe_resolved_path", lambda _: None)
     monkeypatch.setattr(server, "_validate_upload_assistant_args", lambda args: args)
     monkeypatch.setattr(server, "_spawn_webui_upload_process", lambda *_args: (process, "subprocess"))
-    monkeypatch.setattr(server, "_terminate_process_tree", terminated_processes.append)
-    monkeypatch.setattr(server, "_close_webui_process_io", lambda _: None)
+
+    def terminate(process):
+        terminated_processes.append(process)
+        return True
+
+    monkeypatch.setattr(server, "_terminate_process_tree", terminate)
 
     response = server.app.test_client().post("/api/execute", json={"path": str(tmp_path), "session_id": session_id}, buffered=False)
     try:
@@ -200,7 +206,195 @@ def test_sse_disconnect_terminates_running_process_tree(tmp_path, monkeypatch) -
         response.close()
 
         assert terminated_processes == [process]
+        assert session_id not in server.active_processes
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
     finally:
         response.close()
         with server.active_processes_lock:
             server.active_processes.pop(session_id, None)
+
+
+@pytest.fixture
+def running_controller(tmp_path, monkeypatch):
+    content = tmp_path / "Fictional.Release.mkv"
+    content.touch()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    process = Mock(pid=1234, stdin=io.StringIO(), stdout=io.StringIO(), stderr=io.StringIO())
+    process.poll.return_value = None
+    root = Mock()
+    root.children.side_effect = psutil.AccessDenied(pid=1234)
+    spawn = Mock(return_value=(process, "subprocess"))
+
+    monkeypatch.setattr(server, "STATE_DIR", state_dir)
+    monkeypatch.setattr(server, "active_processes", {})
+    monkeypatch.setattr(server, "_generated_queues", {})
+    monkeypatch.setattr(server, "_get_browse_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(server, "_get_bearer_from_header", lambda: None)
+    monkeypatch.setattr(server, "_is_authenticated", lambda: True)
+    monkeypatch.setattr(server, "_verify_csrf_header", lambda: True)
+    monkeypatch.setattr(server, "_verify_same_origin", lambda: True)
+    monkeypatch.setattr(server.limiter, "enabled", False)
+    monkeypatch.setattr(server.psutil, "Process", Mock(return_value=root))
+    monkeypatch.setattr(server.psutil, "wait_procs", Mock(return_value=([root], [])))
+    monkeypatch.setattr(server, "_spawn_webui_upload_process", spawn)
+
+    yield server.app.test_client(), content, process, root, spawn
+
+    for stream in (process.stdin, process.stdout, process.stderr):
+        stream.close()
+
+
+@pytest.mark.parametrize("stream_error", [False, True], ids=["disconnect", "stream-error"])
+def test_failed_stream_cleanup_preserves_controller_and_queue_for_kill_retry(running_controller, monkeypatch, stream_error):
+    client, content, process, root, _ = running_controller
+    queue_response = client.post("/api/save_queue", json={"items": [{"path": str(content)}]})
+    queue_path = Path(queue_response.json["path"])
+    session_id = "failed-stream-cleanup"
+    response = client.post("/api/execute", json={"path": str(queue_path), "session_id": session_id}, buffered=False)
+    try:
+        next(response.response)
+        next(response.response)
+        state = server.active_processes[session_id]
+        server.set_execution_preview_target(session_id, str(state["run_token"]), str(content))
+        if stream_error:
+            state["output_queue"].put(("stdout", "\n"))
+            monkeypatch.setattr(server, "_should_flush_subprocess_output", Mock(side_effect=RuntimeError("Stream failed")))
+            event = json.loads(next(response.response).decode().removeprefix("data: "))
+            assert event["type"] == "error"
+        response.close()
+
+        assert server.active_processes[session_id] is state
+        root.terminate.assert_not_called()
+        assert all(not stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert queue_path.is_file()
+        assert server._is_generated_queue(str(queue_path))
+        assert client.post("/api/input", json={"session_id": session_id, "input": "yes"}).status_code == 200
+        assert process.stdin.getvalue() == "yes\n"
+
+        root.children.side_effect = None
+        root.children.return_value = []
+        root.terminate.side_effect = lambda: setattr(process.poll, "return_value", 0)
+        assert client.post("/api/kill", json={"session_id": session_id}).status_code == 200
+        assert session_id not in server.active_processes
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert not queue_path.exists()
+        assert not server._generated_queues
+    finally:
+        response.close()
+
+
+@pytest.mark.parametrize("discovery_error", [psutil.AccessDenied(pid=1234), RuntimeError("Discovery failed")], ids=["denied", "unexpected-error"])
+def test_failed_session_replacement_preserves_original_controller_and_queue(running_controller, discovery_error):
+    client, content, process, root, spawn = running_controller
+    root.children.side_effect = discovery_error
+    queue_response = client.post("/api/save_queue", json={"items": [{"path": str(content)}]})
+    queue_path = Path(queue_response.json["path"])
+    session_id = "failed-replacement"
+    state = server._make_process_state(str(queue_path), "")
+    state.update({"mode": "subprocess", "process": process})
+    server.active_processes[session_id] = state
+
+    response = client.post("/api/execute", json={"path": str(queue_path), "session_id": session_id}, buffered=False)
+    try:
+        event = json.loads(next(response.response).decode().removeprefix("data: "))
+        assert event["type"] == "error"
+        response.close()
+        assert server.active_processes[session_id] is state
+        spawn.assert_not_called()
+        assert all(not stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert queue_path.is_file()
+        assert server._is_generated_queue(str(queue_path))
+        assert client.post("/api/input", json={"session_id": session_id, "input": "yes"}).status_code == 200
+    finally:
+        response.close()
+
+
+def test_session_replacement_waits_for_startup(running_controller):
+    client, content, _, _, spawn = running_controller
+    session_id = "replacement-during-startup"
+    state = server._make_process_state(str(content), "")
+    server.active_processes[session_id] = state
+    response = client.post("/api/execute", json={"path": str(content), "session_id": session_id}, buffered=False)
+    try:
+        event = json.loads(next(response.response).decode().removeprefix("data: "))
+        assert event["type"] == "error"
+        response.close()
+        assert server.active_processes[session_id] is state
+        spawn.assert_not_called()
+    finally:
+        response.close()
+
+
+def test_failed_termination_after_startup_cancellation_preserves_controller(running_controller):
+    client, content, process, root, spawn = running_controller
+    session_id = "cancel-during-startup"
+
+    def cancel_during_spawn(*_args):
+        assert client.post("/api/kill", json={"session_id": session_id}).status_code == 200
+        return process, "subprocess"
+
+    spawn.side_effect = cancel_during_spawn
+    response = client.post("/api/execute", json={"path": str(content), "session_id": session_id}, buffered=False)
+    try:
+        next(response.response)
+        event = json.loads(next(response.response).decode().removeprefix("data: "))
+        assert event["type"] == "error"
+        response.close()
+        assert server.active_processes[session_id]["process"] is process
+        root.terminate.assert_not_called()
+        assert all(not stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert client.post("/api/kill", json={"session_id": session_id}).status_code == 500
+    finally:
+        response.close()
+
+
+def test_disconnect_before_spawn_cancels_startup(running_controller):
+    client, content, _, _, spawn = running_controller
+    session_id = "disconnect-before-spawn"
+    response = client.post("/api/execute", json={"path": str(content), "session_id": session_id}, buffered=False)
+    next(response.response)
+    response.close()
+    assert session_id not in server.active_processes
+    spawn.assert_not_called()
+
+
+def test_kill_before_spawn_cancels_startup(running_controller):
+    client, content, _, _, spawn = running_controller
+    session_id = "kill-before-spawn"
+    response = client.post("/api/execute", json={"path": str(content), "session_id": session_id}, buffered=False)
+    try:
+        next(response.response)
+        assert client.post("/api/kill", json={"session_id": session_id}).status_code == 200
+        with pytest.raises(StopIteration):
+            next(response.response)
+        assert session_id not in server.active_processes
+        spawn.assert_not_called()
+    finally:
+        response.close()
+
+
+def test_replacement_does_not_overwrite_a_newer_session(running_controller):
+    client, content, process, root, spawn = running_controller
+    session_id = "concurrent-replacement"
+    old_state = server._make_process_state(str(content), "")
+    old_state["process"] = process
+    newer_state = server._make_process_state(str(content), "")
+    server.active_processes[session_id] = old_state
+    root.children.side_effect = None
+    root.children.return_value = []
+
+    def finish_previous_controller():
+        process.poll.return_value = 0
+        server.active_processes[session_id] = newer_state
+
+    root.terminate.side_effect = finish_previous_controller
+    response = client.post("/api/execute", json={"path": str(content), "session_id": session_id}, buffered=False)
+    try:
+        event = json.loads(next(response.response).decode().removeprefix("data: "))
+        assert event["type"] == "error"
+        response.close()
+        assert server.active_processes[session_id] is newer_state
+        spawn.assert_not_called()
+    finally:
+        response.close()

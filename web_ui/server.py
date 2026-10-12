@@ -850,6 +850,24 @@ def _remove_generated_queue_file(key: str) -> None:
         path.unlink(missing_ok=True)
 
 
+def _cleanup_execution_queue(process_state: Mapping[str, object]) -> None:
+    """Remove a stopped execution's queue unless another execution uses it."""
+    queue_path = process_state.get("queue_path")
+    if not isinstance(queue_path, str) or not queue_path:
+        return
+    try:
+        key = os.path.normcase(os.path.realpath(queue_path))
+        with active_processes_lock, _generated_queues_lock:
+            if any(state is not process_state and state.get("queue_path") == queue_path for state in active_processes.values()):
+                return
+            generated = _generated_queues.pop(key, None)
+        if generated is not None:
+            _remove_generated_queue_file(key)
+            console.print(f"Cleaned up queue file: {Path(queue_path).name}", markup=False)
+    except OSError as error:
+        console.print(f"Failed to cleanup queue file: {error}", markup=False)
+
+
 # Runtime flags and stored totp
 saved_totp_secret: str | None = None
 
@@ -1508,6 +1526,7 @@ def _make_process_state(path: str, args: str) -> dict[str, object]:
         "run_token": secrets.token_hex(8),
         "mode": "starting",
         "path": path,
+        "queue_path": path if Path(path).suffix.lower() == ".txt" else None,
         "args": args,
         "started_at": time.time(),
         "awaiting_input": False,
@@ -6887,7 +6906,7 @@ def save_queue():
             # Bound abandoned queue registrations. Old files never become trusted
             # merely because their names have the webui_queue_ prefix.
             if len(_generated_queues) >= MAX_UPLOAD_PATHS:
-                active_queue_keys = {os.path.normcase(os.path.realpath(str(process.get("path", "")))) for process in active_processes.values()}
+                active_queue_keys = {os.path.normcase(os.path.realpath(str(process.get("queue_path") or process.get("path", "")))) for process in active_processes.values()}
                 evicted_key = next((entry for entry in _generated_queues if entry not in active_queue_keys), None)
                 if evicted_key is None:
                     file_path.unlink(missing_ok=True)
@@ -6998,6 +7017,9 @@ def execute_command():
             return jsonify({"error": "Missing path", "success": False}), 400
 
         def generate():
+            process_state: dict[str, object] | None = None
+            process: _WebUIProcess | None = None
+            terminated = True
             try:
                 # Build command to run upload.py directly
                 validated_path = _validate_execution_path(path)
@@ -7028,15 +7050,27 @@ def execute_command():
 
                 # Invalid requests must not terminate an existing session.
                 with active_processes_lock:
-                    existing = active_processes.pop(session_id, None)
+                    existing = active_processes.get(session_id)
                 if existing:
                     proc = existing.get("process")
-                    if proc and proc.poll() is None:
-                        with contextlib.suppress(Exception):
-                            _terminate_process_tree(proc)
-                process_state = _make_process_state(validated_path, args)
+                    if proc is None:
+                        yield f"data: {json.dumps({'type': 'error', 'data': 'Execution is still starting; try again after startup completes'})}\n\n"
+                        return
+                    if not _terminate_process_tree(proc):
+                        yield f"data: {json.dumps({'type': 'error', 'data': 'Failed to terminate the previous process tree'})}\n\n"
+                        return
+                    _close_webui_process_io(proc)
+                new_state = _make_process_state(validated_path, args)
                 with active_processes_lock:
-                    active_processes[session_id] = process_state
+                    current_state = active_processes.get(session_id)
+                    if current_state is None or current_state is existing:
+                        process_state = new_state
+                        active_processes[session_id] = process_state
+                if process_state is None:
+                    yield f"data: {json.dumps({'type': 'error', 'data': 'Execution session changed; try again'})}\n\n"
+                    return
+                if existing:
+                    _cleanup_execution_queue(existing)
 
                 command_str = subprocess.list2cmdline(command)
                 console.print(f"Running: {command_str}", markup=False)
@@ -7091,10 +7125,12 @@ def execute_command():
                     return
 
                 # codeql[py/command-line-injection]
-                process = None
                 # Wrap subprocess handling in try/finally to guarantee cleanup
                 try:
+                    if process_state.get("cancel_requested"):
+                        return
                     process, process_mode = _spawn_webui_upload_process(command, Path(base_dir), env)
+                    terminated = False
 
                     process_state.update(
                         {
@@ -7102,9 +7138,8 @@ def execute_command():
                             "process": process,
                         }
                     )
-                    if not _session_state_is_current(session_id, process_state):
-                        _terminate_process_tree(process)
-                        raise RuntimeError("Execution session was replaced before subprocess startup completed")
+                    if process_state.get("cancel_requested") or not _session_state_is_current(session_id, process_state):
+                        raise RuntimeError("Execution session was cancelled or replaced before subprocess startup completed")
 
                     output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
 
@@ -7276,36 +7311,22 @@ def execute_command():
 
                     yield f"data: {json.dumps({'type': 'exit', 'code': exit_code})}\n\n"
                 finally:
-                    with contextlib.suppress(Exception):
-                        if process is not None and process.poll() is None:
-                            _terminate_process_tree(process)
                     if process is not None:
-                        _close_webui_process_io(process)
-                    # Ensure we remove tracking entry if still present
-                    with contextlib.suppress(Exception):
-                        _discard_session_state(session_id, process_state)
+                        with contextlib.suppress(Exception):
+                            terminated = process.poll() is not None or _terminate_process_tree(process)
+                        if terminated:
+                            _close_webui_process_io(process)
 
             except Exception as e:
                 console.print(f"Execution error for session {session_id}: {e}", markup=False)
                 console.print(traceback.format_exc(), markup=False)
                 yield f"data: {json.dumps({'type': 'error', 'data': 'Execution error'})}\n\n"
-
-                # Clean up on error
-                with contextlib.suppress(Exception):
-                    if "process_state" in locals():
-                        _discard_session_state(session_id, cast(Mapping[str, object], process_state))
             finally:
-                try:
-                    if "validated_path" in locals() and validated_path:
-                        p_obj = Path(validated_path)
-                        key = os.path.normcase(os.path.realpath(p_obj))
-                        with _generated_queues_lock:
-                            generated = _generated_queues.pop(key, None)
-                        if generated is not None:
-                            _remove_generated_queue_file(key)
-                            console.print(f"Cleaned up queue file: {p_obj.name}", markup=False)
-                except Exception as cleanup_err:
-                    console.print(f"Failed to cleanup queue file: {cleanup_err}", markup=False)
+                # Keep live controllers, their I/O, and their queues available
+                # for input or another Kill attempt after a cleanup failure.
+                if terminated and process_state is not None:
+                    _discard_session_state(session_id, process_state)
+                    _cleanup_execution_queue(process_state)
 
         return Response(generate(), mimetype="text/event-stream")
 
@@ -7399,9 +7420,11 @@ def kill_process():
         process = process_info.get("process")
         if process is None:
             # Kill can race with startup after the session has been registered
-            # but before Popen returns. Removing this state makes the launcher
-            # terminate the controller immediately if it does start.
-            _discard_session_state(session_id, process_info)
+            # but before Popen returns. Keep tracking until the launcher can
+            # confirm cancellation or terminate a controller that did start.
+            with active_processes_lock:
+                if active_processes.get(session_id) is process_info:
+                    process_info["cancel_requested"] = True
             return jsonify({"success": True, "message": "Execution startup cancelled"})
 
         terminated = False
@@ -7427,8 +7450,10 @@ def kill_process():
                     stderr_t.join(timeout=1)
 
             if terminated:
-                with contextlib.suppress(Exception):
-                    active_processes.pop(session_id, None)
+                with active_processes_lock:
+                    if active_processes.get(session_id) is process_info:
+                        active_processes.pop(session_id, None)
+                _cleanup_execution_queue(process_info)
 
         if not terminated:
             return jsonify({"error": "Failed to terminate process tree", "success": False}), 500
