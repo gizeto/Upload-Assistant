@@ -1373,8 +1373,10 @@ def _terminate_process_tree(process: _WebUIProcess, timeout: float = 2.0) -> boo
     # exits, its children may be re-parented and become impossible to identify.
     try:
         processes = root.children(recursive=True)
-    except psutil.NoSuchProcess, psutil.AccessDenied, OSError:
+    except psutil.NoSuchProcess:
         processes = []
+    except psutil.AccessDenied, OSError:
+        return False
     processes.append(root)
 
     for child in processes:

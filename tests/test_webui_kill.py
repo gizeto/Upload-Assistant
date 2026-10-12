@@ -1,10 +1,13 @@
 # ruff: noqa: S101, S603
+import contextlib
 import io
 import subprocess
 import sys
 import time
+from unittest.mock import Mock
 
 import psutil
+import pytest
 
 import web_ui.server as server
 
@@ -36,6 +39,11 @@ def test_execute_missing_path_preserves_running_session_process(monkeypatch) -> 
 
 
 def test_kill_endpoint_stops_upload_controller_and_worker(monkeypatch) -> None:
+    try:
+        psutil.Process().children(recursive=True)
+    except (psutil.AccessDenied, PermissionError) as exc:
+        pytest.skip(f"Process discovery is not permitted: {exc}")
+
     child_code = "import time; time.sleep(60)"
     controller_code = f"import subprocess, sys, time; worker = subprocess.Popen([sys.executable, '-c', {child_code!r}]); print(worker.pid, flush=True); time.sleep(60)"
     controller = subprocess.Popen(
@@ -70,9 +78,44 @@ def test_kill_endpoint_stops_upload_controller_and_worker(monkeypatch) -> None:
     finally:
         with server.active_processes_lock:
             server.active_processes.pop("kill-tree-test", None)
+        with contextlib.suppress(psutil.NoSuchProcess):
+            psutil.Process(worker_pid).kill()
         if controller.poll() is None:
             controller.kill()
             controller.wait(timeout=5)
+        controller.stdout.close()
+
+
+def test_terminate_process_tree_stops_controller_and_worker(monkeypatch) -> None:
+    process = Mock(pid=1234)
+    process.poll.side_effect = [None, 0]
+    root = Mock()
+    worker = Mock()
+    root.children.return_value = [worker]
+    monkeypatch.setattr(server.psutil, "Process", Mock(return_value=root))
+    monkeypatch.setattr(server.psutil, "wait_procs", Mock(return_value=([worker, root], [])))
+
+    assert server._terminate_process_tree(process) is True
+    worker.terminate.assert_called_once()
+    root.terminate.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "discovery_error",
+    [psutil.AccessDenied(pid=1234), PermissionError("Process discovery is not permitted"), OSError("Process discovery failed")],
+    ids=["access-denied", "permission-error", "os-error"],
+)
+def test_terminate_process_tree_keeps_controller_when_discovery_fails(monkeypatch, discovery_error) -> None:
+    process = Mock(pid=1234)
+    process.poll.side_effect = [None, 0]
+    root = Mock()
+    root.children.side_effect = discovery_error
+    monkeypatch.setattr(server.psutil, "Process", Mock(return_value=root))
+    monkeypatch.setattr(server.psutil, "wait_procs", Mock(return_value=([], [])))
+
+    assert server._terminate_process_tree(process) is False
+    root.terminate.assert_not_called()
+    process.wait.assert_not_called()
 
 
 def test_kill_keeps_session_when_process_tree_termination_fails(monkeypatch) -> None:
