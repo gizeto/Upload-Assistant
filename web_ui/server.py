@@ -1572,6 +1572,14 @@ def _discard_session_state(session_id: str, process_state: Mapping[str, object])
             active_processes.pop(session_id, None)
 
 
+def _cleanup_detached_execution(session_id: str, process_state: Mapping[str, object], process: _WebUIProcess) -> None:
+    while process.poll() is None:
+        time.sleep(0.1)
+    _close_webui_process_io(process)
+    _discard_session_state(session_id, process_state)
+    _cleanup_execution_queue(process_state)
+
+
 def _string_list_preview_values(value: object) -> list[str]:
     results: list[str] = []
     if isinstance(value, str):
@@ -7016,6 +7024,7 @@ def execute_command():
         def generate():
             process_state: dict[str, object] | None = None
             process: _WebUIProcess | None = None
+            output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
             terminated = True
             try:
                 # Build command to run upload.py directly
@@ -7135,10 +7144,10 @@ def execute_command():
                             "process": process,
                         }
                     )
-                    if process_state.get("cancel_requested") or not _session_state_is_current(session_id, process_state):
-                        raise RuntimeError("Execution session was cancelled or replaced before subprocess startup completed")
 
-                    output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+                    def enqueue_output(output_type: str, char: str) -> None:
+                        with contextlib.suppress(queue.ShutDown):
+                            output_queue.put((output_type, char))
 
                     if isinstance(process, _ConPtyProcess):
                         # A pseudo terminal combines stdout and stderr into one ANSI stream.
@@ -7149,7 +7158,7 @@ def execute_command():
                                     # the pipe reader. ConPTY can return a whole prompt plus
                                     # its trailing input marker in one read.
                                     for char in process.read(1024):
-                                        output_queue.put(("stdout", char))
+                                        enqueue_output("stdout", char)
                             except EOFError:
                                 pass
                             except Exception as err:
@@ -7168,7 +7177,7 @@ def execute_command():
                                     chunk = stdout.read(1)
                                     if not chunk:
                                         break
-                                    output_queue.put(("stdout", chunk))
+                                    enqueue_output("stdout", chunk)
                             except Exception as err:
                                 console.print(f"stdout read error: {err}", markup=False)
 
@@ -7182,7 +7191,7 @@ def execute_command():
                                     chunk = stderr.read(1)
                                     if not chunk:
                                         break
-                                    output_queue.put(("stderr", chunk))
+                                    enqueue_output("stderr", chunk)
                             except Exception as err:
                                 console.print(f"stderr read error: {err}", markup=False)
 
@@ -7199,6 +7208,9 @@ def execute_command():
                             process_state["stdout_thread"] = stdout_thread
                             process_state["stderr_thread"] = stderr_thread
                             process_state["output_queue"] = output_queue
+
+                    if process_state.get("cancel_requested") or not _session_state_is_current(session_id, process_state):
+                        raise RuntimeError("Execution session was cancelled or replaced before subprocess startup completed")
 
                     console.print(
                         f"Started {process_mode} reader threads for session {session_id}: stdout={stdout_thread.name}, stderr={getattr(stderr_thread, 'name', 'merged')}",
@@ -7324,6 +7336,11 @@ def execute_command():
                 if terminated and process_state is not None:
                     _discard_session_state(session_id, process_state)
                     _cleanup_execution_queue(process_state)
+                elif process_state is not None and process is not None:
+                    output_queue.shutdown(immediate=True)
+                    cleanup_thread = threading.Thread(target=_cleanup_detached_execution, args=(session_id, process_state, process), daemon=True)
+                    process_state["cleanup_thread"] = cleanup_thread
+                    cleanup_thread.start()
 
         return Response(generate(), mimetype="text/event-stream")
 

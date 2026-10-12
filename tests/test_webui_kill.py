@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import time
@@ -237,6 +238,11 @@ def running_controller(tmp_path, monkeypatch):
 
     yield server.app.test_client(), content, process, root, spawn
 
+    process.poll.return_value = 0
+    for state in list(server.active_processes.values()):
+        cleanup_thread = state.get("cleanup_thread")
+        if cleanup_thread is not None:
+            cleanup_thread.join(timeout=2)
     for stream in (process.stdin, process.stdout, process.stderr):
         stream.close()
 
@@ -292,12 +298,51 @@ def test_failed_stream_cleanup_preserves_controller_and_queue_for_kill_retry(run
         root.children.return_value = []
         root.terminate.side_effect = lambda: setattr(process.poll, "return_value", 0)
         assert client.post("/api/kill", json={"session_id": session_id}).status_code == 200
+        state["cleanup_thread"].join(timeout=2)
         assert session_id not in server.active_processes
         assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
         assert not queue_path.exists()
         assert not server._generated_queues
     finally:
         response.close()
+
+
+@pytest.mark.parametrize("stream_name", ["stdout", "stderr"])
+def test_detached_controller_discards_output_and_cleans_up_after_exit(running_controller, stream_name):
+    client, content, process, _, _ = running_controller
+    queue_response = client.post("/api/save_queue", json={"items": [{"path": str(content)}]})
+    queue_path = Path(queue_response.json["path"])
+    session_id = "detached-controller"
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd) as reader, os.fdopen(write_fd, "w") as writer:
+        getattr(process, stream_name).close()
+        setattr(process, stream_name, reader)
+        response = client.post("/api/execute", json={"path": str(queue_path), "session_id": session_id}, buffered=False)
+        try:
+            next(response.response)
+            next(response.response)
+            state = server.active_processes[session_id]
+            state["output_queue"].put((stream_name, "pending output"))
+            response.close()
+
+            writer.write("output after disconnect\n")
+            writer.close()
+            reader_thread = state[f"{stream_name}_thread"]
+            reader_thread.join(timeout=2)
+            assert not reader_thread.is_alive()
+            assert state["output_queue"].empty()
+            assert server.active_processes[session_id] is state
+            assert queue_path.is_file()
+
+            process.poll.return_value = 0
+            state["cleanup_thread"].join(timeout=2)
+            assert not state["cleanup_thread"].is_alive()
+            assert session_id not in server.active_processes
+            assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+            assert not queue_path.exists()
+            assert not server._generated_queues
+        finally:
+            response.close()
 
 
 @pytest.mark.parametrize("discovery_error", [psutil.AccessDenied(pid=1234), RuntimeError("Discovery failed")], ids=["denied", "unexpected-error"])
