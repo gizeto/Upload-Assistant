@@ -82,6 +82,68 @@ async def test_aliases_validate_translated_titles(case):
 
 
 @pytest.mark.asyncio
+async def test_existing_ids_accept_tmdb_alternative_title(case):
+    case.meta.unattended = False
+    case.meta.tmdb_id, case.meta.imdb_id = 101, 1234567
+    case.tmdb_data[101]["tmdb_aliases"] = ["Alternative Movie Name"]
+    case.imdb_data[1234567].update(title="Alternative Movie Name", year=2019)
+
+    await resolve(case)
+
+    assert (case.meta.tmdb_id, case.meta.imdb_id) == (101, 1234567)
+    assert case.meta.title == "Example Movie"
+    assert case.meta.metadata_id_sources["imdb"] == "TMDb link"
+    case.prompt.assert_not_awaited()
+    case.imdb_search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["tmdb", "imdb"])
+async def test_search_candidates_are_checked_with_full_aliases(case, provider):
+    if provider == "tmdb":
+        case.manager.search_candidates.return_value[0]["title"] = "Alternative Movie Name"
+        case.tmdb_data[101].update(title="Alternative Movie Name", original_title="Alternative Movie Name", tmdb_aliases=["Example Movie"])
+    else:
+        case.tmdb_data[101]["tmdb_imdb_id"] = 0
+        case.imdb_search.return_value = [{"imdbID": "tt1234567", "title": "Alternative Movie Name", "year": 2020, "type": "movie"}]
+        case.imdb_data[1234567].update(title="Alternative Movie Name", akas=[{"title": "Example Movie"}])
+
+    await resolve(case)
+
+    assert (case.meta.tmdb_id, case.meta.imdb_id) == (101, 1234567)
+    case.prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_details", [{"year": 2010}, {"type": "podcastEpisode"}])
+async def test_tmdb_alternative_title_does_not_override_invalid_imdb_details(case, invalid_details):
+    case.tmdb_data[101]["tmdb_aliases"] = ["Alternative Movie Name"]
+    case.imdb_data[1234567].update(title="Alternative Movie Name", **invalid_details)
+    case.imdb_search.return_value = []
+
+    await resolve(case)
+
+    assert (case.meta.tmdb_id, case.meta.imdb_id) == (101, 0)
+    assert case.meta.no_imdb is False
+
+
+@pytest.mark.asyncio
+async def test_matching_full_aliases_do_not_resolve_ambiguous_candidates(case):
+    case.imdb_search.return_value = []
+    case.manager.search_candidates.return_value = [
+        {"id": 101, "title": "Alternative Movie Name", "release_date": "2020-01-01"},
+        {"id": 202, "title": "Another Movie Name", "release_date": "2020-01-01"},
+    ]
+    case.tmdb_data[101].update(title="Alternative Movie Name", original_title="Alternative Movie Name", tmdb_aliases=["Example Movie"])
+    case.tmdb_data[202].update(title="Another Movie Name", original_title="Another Movie Name", tmdb_aliases=["Example Movie"])
+
+    await resolve(case)
+
+    assert (case.meta.tmdb_id, case.meta.imdb_id) == (0, 0)
+    case.prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("imdb_year", [2015, 2020])
 async def test_invalid_link_does_not_disable_future_imdb_lookups(case, imdb_year):
     case.imdb_data[1234567].update(title="Unrelated Movie", year=imdb_year)
@@ -192,6 +254,7 @@ async def test_cancelled_selection_does_not_commit_partial_metadata(case):
 @pytest.mark.asyncio
 async def test_changed_title_clears_other_provider_data(case):
     case.meta.tmdb_id = 202
+    case.meta.tmdb_aliases = ["Old Alternate Title"]
     case.meta.tvdb_id = 303
     case.meta.tvmaze_id = 404
     case.meta.tmdb_episode_data = {"name": "Old Episode"}
@@ -206,6 +269,7 @@ async def test_changed_title_clears_other_provider_data(case):
     assert (case.meta.tvdb_id, case.meta.tvmaze_id) == (0, 0)
     assert case.meta.tmdb_episode_data is case.meta.tmdb_season_data is None
     assert case.meta.tmdb_localized_data == {}
+    assert case.meta.tmdb_aliases == []
     assert case.meta.tvdb_episode_name is None
     assert not any((case.meta.we_checked_tvdb, case.meta.we_asked_tvmaze, case.meta.we_checked_tmdb))
     assert case.meta.artwork_url == "/new-poster.jpg"

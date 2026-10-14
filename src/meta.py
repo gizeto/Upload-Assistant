@@ -495,6 +495,7 @@ class Meta:
     three_d: str = ""
     title: str = ""
     tmdb_adult_media: bool = False
+    tmdb_aliases: list[str] = field(default_factory=list)
     tmdb_cast: list[Any] = field(default_factory=list)
     tmdb_directors: list[Any] = field(default_factory=list)
     tmdb_episode_data: dict[str, Any] | None = None

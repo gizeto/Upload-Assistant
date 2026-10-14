@@ -1074,7 +1074,7 @@ async def tmdb_other_meta(
         if not is_cache_miss(cached_media) and isinstance(cached_media, dict):
             media_data = cached_media
         else:
-            response = await metadata_request(client, "get", main_url, params={"api_key": tmdb_api_key})
+            response = await metadata_request(client, "get", main_url, params={"api_key": tmdb_api_key, "append_to_response": "alternative_titles"})
             try:
                 response.raise_for_status()
                 media_data = typing_cast(dict[str, Any], response.json())
@@ -1082,6 +1082,23 @@ async def tmdb_other_meta(
                 logger.info(f"[bold red]Failed to fetch media data: {response.status_code}[/bold red]")
                 return {}
             await cache.set("tmdb", "main", cache_key, media_data)
+
+        aliases_key = "titles" if category == "MOVIE" else "results"
+        alternatives = media_data.get("alternative_titles")
+        if not isinstance(alternatives, dict):
+            alternatives = {}
+        if not isinstance(alternatives.get(aliases_key), list):
+            try:
+                response = await metadata_request(client, "get", f"{main_url}/alternative_titles", params={"api_key": tmdb_api_key})
+                payload = response.json()
+                if isinstance(payload, dict) and isinstance(payload.get(aliases_key), list):
+                    alternatives = payload
+                    media_data["alternative_titles"] = alternatives
+                    await cache.set("tmdb", "main", cache_key, media_data)
+            except (httpx.HTTPError, ValueError):
+                logger.warning("[yellow]TMDb alternative titles are temporarily unavailable.[/yellow]")
+        aliases = alternatives.get(aliases_key)
+        tmdb_aliases = [alias["title"] for alias in aliases if isinstance(alias, dict) and isinstance(alias.get("title"), str) and alias["title"].strip()] if isinstance(aliases, list) else []
 
         logger.debug(f"[cyan]TMDB Response: {json.dumps(media_data, indent=2)[:1200]}...")
 
@@ -1328,6 +1345,7 @@ async def tmdb_other_meta(
     # Build the metadata dictionary
     return {
         "tmdb_adult_media": adult_media,
+        "tmdb_aliases": tmdb_aliases,
         "title": title,
         "year": year,
         "release_date": release_date,

@@ -852,7 +852,7 @@ def _automatic_imdb_rejection(meta: Meta, filename: str, imdb_id: int, info: dic
         return "IMDb details are unavailable"
     if not info_id.isdigit() or int(info_id) != imdb_id:
         return "IMDb details refer to a different ID"
-    titles = [filename, meta.filename, meta.title, meta.original_title, meta.secondary_title or ""]
+    titles = [filename, meta.filename, meta.title, meta.original_title, meta.secondary_title or "", *meta.tmdb_aliases]
     return imdb_match_rejection(meta.category, meta.year or meta.search_year, titles, info)
 
 

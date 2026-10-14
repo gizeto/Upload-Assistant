@@ -25,6 +25,7 @@ def _year(value: Any) -> int | None:
 
 def _titles(info: dict[str, Any]) -> list[str]:
     titles = [info.get(key) for key in ("title", "original_title", "aka")]
+    titles.extend(info.get("tmdb_aliases") or [])
     titles.extend(aka.get("title") for aka in info.get("akas", []) if isinstance(aka, dict))
     return [title for title in titles if isinstance(title, str) and title.strip()]
 
@@ -135,11 +136,15 @@ class _MetadataLookup:
             if manual_id and candidate:
                 explicit[provider] = candidate
         await asyncio.gather(*(self.load(candidate) for candidate in existing.values() if candidate))
+        titles = self.titles
+        tmdb = existing.get("tmdb")
+        if tmdb and not tmdb.rejection(titles, self.year, self.category):
+            titles = [*titles, *_titles(tmdb.info)]
         providers = []
         for provider, candidate in existing.items():
             if provider in explicit or (provider == "tmdb" and "imdb" in explicit):
                 continue
-            if not candidate or candidate.rejection(self.titles, self.year, self.category):
+            if not candidate or candidate.rejection(titles, self.year, self.category):
                 providers.append(provider)
         await self.search(self.filename, self.year, self.category, tuple(providers))
         return explicit
@@ -227,6 +232,10 @@ class _MetadataLookup:
             ranked = [(score, candidate) for candidate in unique.values() if (score := candidate.score(titles, year, category)) >= 0.85]
             ranked.sort(key=lambda item: item[0], reverse=True)
             if not ranked or (len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.10):
+                unloaded = [candidate for candidate in unique.values() if not candidate.loaded and candidate.category == category]
+                if unloaded:
+                    await asyncio.gather(*(self.load(candidate) for candidate in unloaded))
+                    continue
                 return None
             candidate = await self.load(ranked[0][1])
             candidate.reason = candidate.rejection(titles, year, category)
