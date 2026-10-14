@@ -18,9 +18,10 @@ import httpx
 from src.args import Args
 from src.cleanup import cleanup_manager
 from src.console import logger, prompt_in_thread
-from src.imdb import imdb_manager
+from src.imdb import imdb_manager, title_similarity
 from src.meta import Meta
 from src.metadata_cache import cache_for, is_cache_miss
+from src.metadata_requests import metadata_request
 
 default_config: dict[str, Any] = {}
 tmdb_api_key: str | None = None
@@ -72,6 +73,7 @@ class TmdbManager:
         mode: str = "non_cli",
         category_preference: str | None = None,
         imdb_info: dict[str, Any] | None = None,
+        external_only: bool = False,
     ) -> tuple[str, int | str, str, bool]:
         return await get_tmdb_from_imdb(
             imdb_id=imdb_id,
@@ -82,6 +84,7 @@ class TmdbManager:
             mode=mode,
             category_preference=category_preference,
             imdb_info=imdb_info,
+            external_only=external_only,
         )
 
     async def get_tmdb_id(
@@ -97,6 +100,7 @@ class TmdbManager:
         final_attempt: bool | None = None,
         new_category: str | None = None,
         unattended: bool = False,
+        candidates: list[dict[str, Any]] | None = None,
     ) -> tuple[int, str]:
         return await get_tmdb_id(
             filename=filename,
@@ -110,7 +114,22 @@ class TmdbManager:
             final_attempt=final_attempt,
             new_category=new_category,
             unattended=unattended,
+            candidates=candidates,
         )
+
+    async def search_candidates(
+        self, filename: str, search_year: str | int | None, category: str, *, secondary_title: str | None = None, base_dir: str = "", untouched_filename: str = "",
+    ) -> list[dict[str, Any]]:
+        cache = cache_for(base_dir, self.config)
+        cache_key = json.dumps([filename, search_year, category, secondary_title, untouched_filename])
+        cached = await cache.get("tmdb", "search", cache_key)
+        if not is_cache_miss(cached) and isinstance(cached, list):
+            return cached
+        candidates: list[dict[str, Any]] = []
+        await self.get_tmdb_id(filename, search_year, category, untouched_filename=untouched_filename, secondary_title=secondary_title, unattended=True, candidates=candidates)
+        if candidates:
+            await cache.set("tmdb", "search", cache_key, candidates)
+        return candidates
 
     async def tmdb_other_meta(
         self,
@@ -257,8 +276,8 @@ class TmdbManager:
             target_language=target_language,
         )
 
-    async def set_tmdb_metadata(self, meta: Meta, filename: str | None = None) -> None:
-        return await set_tmdb_metadata(meta=meta, filename=filename)
+    async def set_tmdb_metadata(self, meta: Meta, filename: str | None = None, force: bool = False) -> None:
+        return await set_tmdb_metadata(meta=meta, filename=filename, force=force)
 
     async def get_tmdb_localized_data(
         self,
@@ -288,6 +307,7 @@ async def get_tmdb_from_imdb(
     mode: str = "non_cli",
     category_preference: str | None = None,
     imdb_info: dict[str, Any] | None = None,
+    external_only: bool = False,
 ) -> tuple[str, int | str, str, bool]:
     """Fetches TMDb ID using IMDb or TVDb ID.
 
@@ -311,7 +331,7 @@ async def get_tmdb_from_imdb(
         async with httpx.AsyncClient() as client:
             response: httpx.Response | None = None
             try:
-                response = await client.get(url, params=params, timeout=10)
+                response = await metadata_request(client, "get", url, params=params, timeout=10)
                 response.raise_for_status()
                 return typing_cast(dict[str, Any], response.json())
             except Exception:
@@ -344,6 +364,9 @@ async def get_tmdb_from_imdb(
         logger.debug(f"TV INFO: {info}")
         return "TV", info["tv_results"][0]["id"], info["tv_results"][0].get("original_language"), filename_search
 
+    if category_preference == "TV" and info.get("tv_episode_results"):
+        return "TV", info["tv_episode_results"][0]["show_id"], "", False
+
     logger.debug("[yellow]TMDb was unable to find anything with that IMDb ID, checking TVDb...")
 
     # Check TVDb for an ID if TVDb and still no results
@@ -352,6 +375,9 @@ async def get_tmdb_from_imdb(
         logger.debug(f"TVDB INFO: {info_tvdb}")
         if info_tvdb.get("tv_results"):
             return "TV", info_tvdb["tv_results"][0]["id"], info_tvdb["tv_results"][0].get("original_language"), filename_search
+
+    if external_only:
+        return category_preference or "MOVIE", 0, "", False
 
     filename_search = True
 
@@ -399,6 +425,7 @@ async def get_tmdb_id(
     final_attempt: bool | None = None,
     new_category: str | None = None,
     unattended: bool = False,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> tuple[int, str]:
     search_results: dict[str, Any] = {"results": []}
     category_value = category.get("category", "MOVIE") if isinstance(category, dict) else category
@@ -443,7 +470,7 @@ async def get_tmdb_id(
                     if search_year:
                         params["year"] = str(search_year)
 
-                    response = await client.get(f"{TMDB_BASE_URL}/search/movie", params=params)
+                    response = await metadata_request(client, "get", f"{TMDB_BASE_URL}/search/movie", params=params)
                     try:
                         response.raise_for_status()
                         search_results = typing_cast(dict[str, Any], response.json())
@@ -458,7 +485,7 @@ async def get_tmdb_id(
                     if search_year:
                         params["first_air_date_year"] = str(search_year)
 
-                    response = await client.get(f"{TMDB_BASE_URL}/search/tv", params=params)
+                    response = await metadata_request(client, "get", f"{TMDB_BASE_URL}/search/tv", params=params)
                     try:
                         response.raise_for_status()
                         search_results = typing_cast(dict[str, Any], response.json())
@@ -469,6 +496,13 @@ async def get_tmdb_id(
 
                 # Check if results were found
                 results = typing_cast(list[dict[str, Any]], search_results.get("results", []))
+                if candidates is not None and results:
+                    ranked = sorted(results, key=lambda result: (
+                        max(title_similarity(filename, str(result.get(key) or "")) for key in ("title", "name", "original_title", "original_name")),
+                        str(result.get("release_date") or result.get("first_air_date") or "")[:4] == str(search_year),
+                    ), reverse=True)
+                    candidates.extend({**result, "category": category} for result in ranked[:5])
+                    return int(ranked[0]["id"]), category
                 if results:
                     # Filter results by year if search_year is provided
                     if search_year:
@@ -765,6 +799,11 @@ async def get_tmdb_id(
 
         return 0, category
 
+    logger.debug(f"[yellow]Trying primary filename: {filename}[/yellow]")
+    result = await search_tmdb_id(filename, search_year, category, untouched_filename, debug=debug, secondary_title=secondary_title, path=path, unattended=unattended)
+    if result and result != (0, category):
+        return result
+
     # TMDb doesn't do roman
     if not search_results.get("results"):
         try:
@@ -803,13 +842,6 @@ async def get_tmdb_id(
         result = await search_tmdb_id(
             secondary_title, search_year, category, untouched_filename, debug=debug, secondary_title=secondary_title, path=path, unattended=unattended
         )
-        if result and result != (0, category):
-            return result
-
-    # Try searching with the primary filename
-    logger.debug(f"[yellow]Trying primary filename: {filename}[/yellow]")
-    if not search_results.get("results"):
-        result = await search_tmdb_id(filename, search_year, category, untouched_filename, debug=debug, secondary_title=secondary_title, path=path, unattended=unattended)
         if result and result != (0, category):
             return result
 
@@ -915,6 +947,9 @@ async def get_tmdb_id(
         except Exception as e:
             logger.info(f"[bold red]Reduced name search error:[/bold red] {e}")
             search_results = {"results": []}
+
+    if unattended or candidates is not None:
+        return 0, category
 
     # No match found, prompt user if in CLI mode
     logger.info("[bold red]Unable to find TMDb match using any search[/bold red]")
@@ -1039,7 +1074,7 @@ async def tmdb_other_meta(
         if not is_cache_miss(cached_media) and isinstance(cached_media, dict):
             media_data = cached_media
         else:
-            response = await client.get(main_url, params={"api_key": tmdb_api_key})
+            response = await metadata_request(client, "get", main_url, params={"api_key": tmdb_api_key})
             try:
                 response.raise_for_status()
                 media_data = typing_cast(dict[str, Any], response.json())
@@ -1109,7 +1144,7 @@ async def tmdb_other_meta(
         # Prepare all API endpoints for concurrent requests
         endpoints = [
             # External IDs
-            client.get(f"{main_url}/external_ids", params={"api_key": tmdb_api_key}),
+            metadata_request(client, "get", f"{main_url}/external_ids", params={"api_key": tmdb_api_key}),
             # Videos
             client.get(f"{main_url}/videos", params={"api_key": tmdb_api_key}),
             # Keywords
@@ -1175,8 +1210,7 @@ async def tmdb_other_meta(
 
                 # Process TVDB ID
                 if tvdb_id == 0:
-                    tvdb_id_str = external.get("tvdb_id", None)
-                    tvdb_id = (int(tvdb_id_str) if tvdb_id_str.isdigit() else 0) if isinstance(tvdb_id_str, str) and tvdb_id_str not in ["", " ", "None", "null"] else 0
+                    tvdb_id = int(external.get("tvdb_id") or 0)
             except Exception:
                 logger.info("[bold red]Failed to process external IDs[/bold red]")
 
@@ -2028,15 +2062,9 @@ async def get_tmdb_translations(
             return ""
 
 
-async def set_tmdb_metadata(meta: Meta, filename: str | None = None) -> None:
-    if not meta.edit:
-        # if we have these fields already, we probably got them from a multi id searching
-        # and don't need to fetch them again
-        essential_fields = ["title", "year", "genres", "overview"]
-        tmdb_metadata_populated = all(meta.get(field) is not None for field in essential_fields) and bool(meta.get("title"))
-    else:
-        # if we're in that blasted edit mode, ignore any previous set data and get fresh
-        tmdb_metadata_populated = False
+async def set_tmdb_metadata(meta: Meta, filename: str | None = None, force: bool = False) -> None:
+    essential_fields = ("title", "year", "genres", "overview")
+    tmdb_metadata_populated = not (meta.edit or force) and bool(meta.title) and all(meta.get(field) is not None for field in essential_fields)
 
     if not tmdb_metadata_populated:
         max_attempts = 2
@@ -2054,11 +2082,11 @@ async def set_tmdb_metadata(meta: Meta, filename: str | None = None) -> None:
                     mal_manual=int(meta.mal_manual) if isinstance(meta.mal_manual, int) or (isinstance(meta.mal_manual, str) and meta.mal_manual.isdigit()) else None,
                     aka=meta.aka,
                     original_language=meta.original_language,
-                    poster=meta.artwork_url,
+                    poster=None if force else meta.artwork_url,
                     debug=meta.debug,
                     mode=(meta.mode if meta.mode is not None else "cli"),
                     tvdb_id=meta.tvdb_id,
-                    quickie_search=meta.quickie_search,
+                    quickie_search=meta.quickie_search and not meta.imdb_manual,
                     filename=filename,
                     base_dir=meta.base_dir,
                     manual_season=meta.manual_season,

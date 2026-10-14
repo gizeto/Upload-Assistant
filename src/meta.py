@@ -246,6 +246,8 @@ class Meta:
     image_sizes: dict[str, Any] = field(default_factory=dict)
     imdb_id: int | None = None
     tmdb_imdb_id: int = 0
+    metadata_id_sources: dict[str, str] = field(default_factory=dict)
+    metadata_identity: dict[str, Any] = field(default_factory=dict)
     imdb_info: dict[str, Any] = field(default_factory=dict)
     imdb_manual: str | int | None = None
     imdb_mismatch: bool = False

@@ -17,6 +17,7 @@ import httpx
 from src.cleanup import cleanup_manager
 from src.console import logger, prompt_in_thread
 from src.metadata_cache import cache_for, is_cache_miss
+from src.metadata_requests import MetadataUnavailableError, metadata_request
 
 anitopy_parse_fn: Any = cast(Any, anitopy).parse
 guessit_module: Any = cast(Any, guessit)
@@ -25,11 +26,20 @@ IMDB_GRAPHQL_HEADERS = {"Content-Type": "application/json", "Referer": "https://
 
 
 def _normalized_title(value: str) -> str:
+    value = re.sub(r"\s*\((?:18|19|20)\d{2}\)\s*$", "", value)
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
-    return " ".join(re.findall(r"[a-z0-9]+", value))
+    numerals = {"ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"}
+    return " ".join(numerals.get(word, word) if index else word for index, word in enumerate(re.findall(r"[a-z]+|\d+", value)))
 
 
-def imdb_match_rejection(category: str, year: int | str | None, titles: list[str], imdb_info: dict[str, Any], tmdb_imdb_id: int = 0) -> str | None:
+def title_similarity(first: str, second: str) -> float:
+    first, second = _normalized_title(first), _normalized_title(second)
+    if re.findall(r"\b\d+\b", first) != re.findall(r"\b\d+\b", second):
+        return 0.0
+    return SequenceMatcher(None, first, second).ratio()
+
+
+def imdb_match_rejection(category: str, year: int | str | None, titles: list[str], imdb_info: dict[str, Any]) -> str | None:
     """Explain why an automatically found IMDb title cannot identify this work."""
     title_type = re.sub(r"[^a-z]", "", str(imdb_info.get("type") or "").lower())
     valid_types = {
@@ -44,22 +54,14 @@ def imdb_match_rejection(category: str, year: int | str | None, titles: list[str
         expected_year = int(year or 0)
     except TypeError, ValueError:
         imdb_year = expected_year = 0
-    if not imdb_year or not expected_year or abs(imdb_year - expected_year) > 2:
+    if not imdb_year or (expected_year and abs(imdb_year - expected_year) > 2):
         return f"IMDb year {imdb_year or 'unknown'} does not match {expected_year or 'unknown'}"
-
-    imdb_id = str(imdb_info.get("imdbID") or imdb_info.get("id") or "").removeprefix("tt")
-    if tmdb_imdb_id and imdb_id.isdigit() and int(imdb_id) == tmdb_imdb_id:
-        return None
 
     imdb_titles = [imdb_info.get("title"), imdb_info.get("aka")]
     imdb_titles.extend(aka.get("title") for aka in imdb_info.get("akas", []) if isinstance(aka, dict))
-    normalized_expected = [_normalized_title(title) for title in titles if isinstance(title, str) and title.strip()]
-    normalized_imdb = [_normalized_title(title) for title in imdb_titles if isinstance(title, str) and title.strip()]
-    if (
-        not normalized_expected
-        or not normalized_imdb
-        or not any(SequenceMatcher(None, expected, candidate).ratio() >= 0.8 for expected in normalized_expected for candidate in normalized_imdb)
-    ):
+    expected_titles = [title for title in titles if isinstance(title, str) and title.strip()]
+    imdb_titles = [title for title in imdb_titles if isinstance(title, str) and title.strip()]
+    if not any(title_similarity(expected, candidate) >= 0.8 for expected in expected_titles for candidate in imdb_titles):
         return "IMDb title does not match the release or TMDb titles"
     return None
 
@@ -84,6 +86,7 @@ class ImdbManager:
         manual_language: str | dict[str, Any] | None = None,
         base_dir: str = "",
         config: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> dict[str, Any]:
         imdb_info: dict[str, Any] = {}
 
@@ -320,8 +323,10 @@ class ImdbManager:
 
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(
+                response = await metadata_request(
+                    client, "post",
                     "https://api.graphql.imdb.com/",
+                    graphql=True,
                     json=query,
                     headers=IMDB_GRAPHQL_HEADERS,
                     timeout=10,
@@ -329,10 +334,18 @@ class ImdbManager:
                 response.raise_for_status()
                 data = cast(dict[str, Any], response.json())
             except httpx.HTTPStatusError as e:
+                if strict and e.response.status_code != 404:
+                    raise
                 logger.info(f"[red]IMDb API error: {e.response.status_code}[/red]")
                 return imdb_info
             except httpx.RequestError as e:
+                if strict:
+                    raise
                 logger.info(f"[red]IMDb API Network error: {e}[/red]")
+                return imdb_info
+            except MetadataUnavailableError:
+                if strict:
+                    raise
                 return imdb_info
 
         title_data = self.safe_get(data, ["data", "title"], {})
@@ -340,6 +353,11 @@ class ImdbManager:
             if not data.get("errors"):
                 await cache.set("imdb", "title", cache_key, imdb_info, negative=True)
             return imdb_info  # Return empty if no data found
+
+        if self.safe_get(title_data, ["id"]) != imdb_id_str:
+            if strict:
+                raise MetadataUnavailableError("IMDb returned details for a different ID")
+            return imdb_info
 
         imdb_info["imdbID"] = imdb_id_str
         imdb_info["imdb_url"] = f"https://www.imdb.com/title/{imdb_id_str}"
@@ -526,6 +544,7 @@ class ImdbManager:
         duration: str | int | None = None,
         unattended: bool = False,
         on_manual_selection: Callable[[int], None] | None = None,
+        candidates: list[dict[str, Any]] | None = None,
     ) -> int:
         search_results: list[dict[str, Any]] = []
         imdb_id_result = imdb_id = 0
@@ -544,8 +563,6 @@ class ImdbManager:
             wide_search: bool = False,
         ) -> list[dict[str, Any]]:
             search_results: list[dict[str, Any]] = []
-            if secondary_title is not None:
-                filename = secondary_title
             if attempted is None:
                 attempted = 0
             if attempted:
@@ -607,7 +624,7 @@ class ImdbManager:
 
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json=query, headers=IMDB_GRAPHQL_HEADERS, timeout=10)
+                    response = await metadata_request(client, "post", url, graphql=True, json=query, headers=IMDB_GRAPHQL_HEADERS, timeout=10)
                     response.raise_for_status()
                     data = response.json()
             except Exception as e:
@@ -719,6 +736,22 @@ class ImdbManager:
                         search_results = result
             except Exception as e:
                 logger.info(f"[bold red]Further reduced name search error:[/bold red] {e}")
+
+        if candidates is not None:
+            for result in search_results:
+                title = self.safe_get(result, ["node", "title"], {})
+                candidates.append({
+                    "imdbID": title.get("id", ""),
+                    "title": self.safe_get(title, ["titleText", "text"], ""),
+                    "type": self.safe_get(title, ["titleType", "text"], ""),
+                    "year": self.safe_get(title, ["releaseYear", "year"], None),
+                })
+            candidates.sort(key=lambda candidate: (
+                imdb_match_rejection(category or "", search_year, [filename, secondary_title or ""], candidate) is None,
+                title_similarity(filename, str(candidate.get("title") or "")),
+            ), reverse=True)
+            del candidates[5:]
+            return 0
 
         if quickie:
             for result in search_results:
@@ -917,6 +950,23 @@ class ImdbManager:
 
         return imdb_id_result if imdb_id_result else 0
 
+    async def search_candidates(
+        self, filename: str, search_year: str | int | None, category: str, *, secondary_title: str | None = None, base_dir: str = "", config: dict[str, Any] | None = None,
+        untouched_filename: str = "",
+    ) -> list[dict[str, Any]]:
+        cache = cache_for(base_dir, config)
+        cache_key = json.dumps([filename, search_year, category, secondary_title, untouched_filename])
+        cached = await cache.get("imdb", "search", cache_key)
+        if not is_cache_miss(cached) and isinstance(cached, list):
+            return cached
+        candidates: list[dict[str, Any]] = []
+        await self.search_imdb(
+            filename, search_year, category=category, secondary_title=secondary_title, untouched_filename=untouched_filename, quickie=True, unattended=True, candidates=candidates,
+        )
+        if candidates:
+            await cache.set("imdb", "search", cache_key, candidates)
+        return candidates
+
     async def get_imdb_from_episode(self, imdb_id: int | str) -> dict[str, Any] | None:
         if not imdb_id or imdb_id == 0:
             return None
@@ -966,7 +1016,7 @@ class ImdbManager:
 
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post("https://api.graphql.imdb.com/", json=query, headers=IMDB_GRAPHQL_HEADERS, timeout=10)
+                response = await metadata_request(client, "post", "https://api.graphql.imdb.com/", graphql=True, json=query, headers=IMDB_GRAPHQL_HEADERS, timeout=10)
                 response.raise_for_status()
                 data = response.json()
             except Exception as e:

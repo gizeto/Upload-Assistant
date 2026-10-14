@@ -29,6 +29,7 @@ from src.imdb import imdb_manager, imdb_match_rejection
 from src.languages import languages_manager
 from src.media_extensions import VIDEO_EXTENSIONS
 from src.meta import Meta
+from src.metadata_resolution import resolve_metadata
 from src.region import get_distributor, get_region, get_service
 from src.sports import detect_sports
 from src.tags import get_tag, tag_override
@@ -852,27 +853,7 @@ def _automatic_imdb_rejection(meta: Meta, filename: str, imdb_id: int, info: dic
     if not info_id.isdigit() or int(info_id) != imdb_id:
         return "IMDb details refer to a different ID"
     titles = [filename, meta.filename, meta.title, meta.original_title, meta.secondary_title or ""]
-    return imdb_match_rejection(meta.category, meta.year or meta.search_year, titles, info, int(meta.tmdb_imdb_id or 0))
-
-
-def _reject_invalid_automatic_imdb(meta: Meta, filename: str) -> None:
-    if meta.no_imdb or meta.imdb_manual or not meta.imdb_id or meta.category not in ("MOVIE", "TV"):
-        return
-
-    info = meta.imdb_info if isinstance(meta.imdb_info, dict) else {}
-    reason = _automatic_imdb_rejection(meta, filename, int(meta.imdb_id), info)
-    if not reason:
-        return
-
-    imdb_titles = {str(info.get(key) or "").casefold().strip() for key in ("title", "aka")}
-    if meta.aka and meta.aka.removeprefix("AKA ").casefold().strip() in imdb_titles:
-        meta.aka = ""
-    logger.warning(f"[yellow]Ignoring automatic IMDb tt{meta.imdb_id}: {reason}. Continuing without IMDb.[/yellow]")
-    _clear_imdb_metadata(meta)
-    meta.no_imdb = True
-    meta.automatic_imdb_rejected = True
-    meta.imdb_mismatch = False
-    meta.mismatched_imdb_id = 0
+    return imdb_match_rejection(meta.category, meta.year or meta.search_year, titles, info)
 
 
 def _apply_derived_imdb_id(meta: Meta, filename: str, imdb_id: int, info: dict[str, Any]) -> bool:
@@ -936,6 +917,8 @@ async def search_metadata(
     mi: dict[str, Any] | None,
 ) -> None:
     # Ensure all manual IDs have proper default values
+    original_meta = meta
+    meta = meta.copy()
     meta.tmdb_manual = meta.tmdb_manual or 0
     meta.imdb_manual = meta.imdb_manual or 0
     meta.mal_manual = meta.mal_manual or 0
@@ -955,18 +938,9 @@ async def search_metadata(
         if not meta.tmdb_id:
             meta.tmdb_id = 0
 
-    # Set imdb_id with proper handling for 'tt' prefix
-    try:
-        if not meta.no_imdb and not meta.imdb_id:
-            imdb_value = meta.imdb_manual
-            if imdb_value:
-                if str(imdb_value).startswith("tt"):
-                    meta.imdb_id = int(str(imdb_value)[2:])
-                else:
-                    meta.imdb_id = int(imdb_value)
-            else:
-                meta.imdb_id = 0
-    except ValueError, TypeError:
+    if not meta.no_imdb and meta.imdb_manual:
+        meta.imdb_id = _to_int(str(meta.imdb_manual).removeprefix("tt"))
+    elif not meta.imdb_id:
         meta.imdb_id = 0
 
     # Set mal_id
@@ -1162,168 +1136,12 @@ async def search_metadata(
             _clear_imdb_metadata(meta)
 
     meta.video_duration = await video_manager.get_video_duration(meta)
-    duration = meta.video_duration
 
-    unattended = not (not meta.unattended or (meta.unattended and meta.unattended_confirm))
-    debug = bool(meta.debug)
-
-    # run a search to find tmdb and imdb ids if we don't have them
-    if int(meta.tmdb_id or 0) == 0 and int(meta.imdb_id or 0) == 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        year = meta.manual_year or meta.search_year or meta.year if meta.category == "TV" else meta.manual_year or meta.year or meta.search_year
-        year_value = _normalize_search_year(year)
-        category_pref = meta.category or ""
-        tmdb_task: asyncio.Task[tuple[int, str]] = asyncio.create_task(
-            prep_instance.tmdb_manager.get_tmdb_id(
-                filename,
-                year_value,
-                category_pref,
-                untouched_filename,
-                attempted=0,
-                debug=debug,
-                secondary_title=meta.secondary_title,
-                unattended=unattended,
-            )
-        )
-        if meta.no_imdb:
-            tmdb_result = await tmdb_task
-            imdb_result = 0
-        else:
-            imdb_task: asyncio.Task[int] = asyncio.create_task(
-                imdb_manager.search_imdb(
-                    filename,
-                    year_value,
-                    quickie=True,
-                    category=category_pref,
-                    secondary_title=meta.secondary_title,
-                    untouched_filename=untouched_filename,
-                    duration=duration,
-                    unattended=unattended,
-                )
-            )
-            tmdb_result, imdb_result = await asyncio.gather(tmdb_task, imdb_task)
-        tmdb_id, category = tmdb_result
-        meta.category = category
-        meta.tmdb_id = _to_int(tmdb_id)
-        meta.imdb_id = _to_int(imdb_result)
-        meta.quickie_search = True
-        meta.no_ids = True
-
-    # If we have an IMDb ID but no TMDb ID, fetch TMDb ID from IMDb
-    if int(meta.imdb_id or 0) != 0 and int(meta.tmdb_id or 0) == 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        imdb_id_value = _to_int(meta.imdb_id)
-        tvdb_id_value = _to_int(meta.tvdb_id)
-        search_year_value = _normalize_search_year(meta.search_year)
-        category, tmdb_id, original_language, filename_search = await prep_instance.tmdb_manager.get_tmdb_from_imdb(
-            imdb_id_value,
-            tvdb_id_value if tvdb_id_value else None,
-            search_year_value,
-            filename,
-            debug=meta.debug,
-            mode=(meta.mode if meta.mode is not None else "non_cli"),
-            category_preference=meta.category,
-            imdb_info=meta.imdb_info,
-        )
-
-        meta.category = category
-        meta.tmdb_id = _to_int(tmdb_id)
-        meta.original_language = original_language
-        meta.no_ids = filename_search
-
-    no_original_language = False
-    if meta.original_language is None:
-        no_original_language = True
-
-    # if we have all of the ids, search everything all at once
-    if int(meta.imdb_id or 0) != 0 and int(meta.tvdb_id or 0) != 0 and int(meta.tmdb_id or 0) != 0 and int(meta.tvmaze_id or 0) != 0:
-        meta = await prep_instance.metadata_searching_manager.all_ids(meta)
-
-    # Check if IMDb, TMDb, and TVDb IDs are all present
-    elif int(meta.imdb_id or 0) != 0 and int(meta.tvdb_id or 0) != 0 and int(meta.tmdb_id or 0) != 0 and not meta.quickie_search:
-        meta = await prep_instance.metadata_searching_manager.imdb_tmdb_tvdb(meta, filename)
-
-    # Check if both IMDb and TVDB IDs are present
-    elif int(meta.imdb_id or 0) != 0 and int(meta.tvdb_id or 0) != 0 and not meta.quickie_search:
-        meta = await prep_instance.metadata_searching_manager.imdb_tvdb(meta, filename)
-
-    # Check if both IMDb and TMDb IDs are present
-    elif int(meta.imdb_id or 0) != 0 and int(meta.tmdb_id or 0) != 0 and not meta.quickie_search:
-        meta = await prep_instance.metadata_searching_manager.imdb_tmdb(meta, filename)
-
-    # we should have tmdb id one way or another, so lets get data if needed
-    if int(meta.tmdb_id or 0) != 0:
-        await prep_instance.tmdb_manager.set_tmdb_metadata(meta, filename)
-        if meta.no_imdb:
-            _clear_imdb_metadata(meta)
-
-    # If there was no original language set before the combined metadata searching, tvdb changes mean we might have set a bad tvdb series name
-    # Now that we have original language, we can safely kill the tvdb series name if it was en original to account for the change
-    if meta.tvdb_series_name and (meta.original_language if meta.original_language is not None else "en") == "en" and meta.tmdb_id != 0 and no_original_language:
-        meta.tvdb_series_name = None
-
-    # If there's a mismatch between IMDb and TMDb IDs, try to resolve it
-    if not meta.no_imdb and meta.imdb_mismatch and "subsplease" not in meta.uuid.lower():
-        logger.debug("[yellow]IMDb ID mismatch detected, attempting to resolve...[/yellow]")
-        # with refactored tmdb, it quite likely to be correct
-        meta.imdb_id = meta.mismatched_imdb_id
-        meta.imdb_info = {}
-
-    # Get IMDb ID if not set
-    if not meta.no_imdb and meta.imdb_id == 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        try:
-            search_year_value = _normalize_search_year(meta.year or meta.search_year)
-            meta.imdb_id = await imdb_manager.search_imdb(
-                filename,
-                search_year_value,
-                quickie=False,
-                category=meta.category,
-                secondary_title=meta.secondary_title,
-                untouched_filename=untouched_filename,
-                attempted=0,
-                duration=duration,
-                unattended=unattended,
-                on_manual_selection=lambda selected_id: setattr(meta, "imdb_manual", selected_id),
-            )
-        except Exception as e:
-            logger.error(f"[red]Error searching IMDb: {e}[/red]")
-            raise Exception(f"Error searching IMDb: {e}") from e
-
-    # user might have skipped tmdb earlier, lets double check
-    if meta.imdb_id != 0 and meta.tmdb_id == 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        logger.info("[yellow]No TMDB ID found, attempting to fetch from IMDb...[/yellow]")
-        imdb_id_value = _to_int(meta.imdb_id)
-        tvdb_id_value = _to_int(meta.tvdb_id)
-        search_year_value = _normalize_search_year(meta.search_year)
-        category, tmdb_id, original_language, filename_search = await prep_instance.tmdb_manager.get_tmdb_from_imdb(
-            imdb_id_value,
-            tvdb_id_value if tvdb_id_value else None,
-            search_year_value,
-            filename,
-            debug=meta.debug,
-            mode=(meta.mode if meta.mode is not None else "non_cli"),
-            category_preference=meta.category,
-            imdb_info=meta.imdb_info,
-        )
-
-        meta.category = category
-        meta.tmdb_id = _to_int(tmdb_id)
-        meta.original_language = original_language
-        meta.no_ids = filename_search
-
-    tmdb_id_value = _to_int(meta.tmdb_id)
-    if tmdb_id_value != 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        await prep_instance.tmdb_manager.set_tmdb_metadata(meta, filename)
-        if meta.no_imdb:
-            _clear_imdb_metadata(meta)
-
-    # Ensure IMDb info is retrieved if it wasn't already fetched or was cleared.
-    imdb_id_value = _to_int(meta.imdb_id)
-    if not meta.no_imdb and not meta.imdb_info and imdb_id_value != 0 and meta.category not in ("BOOK", "GAME", "XXX"):
-        imdb_info = await imdb_manager.get_imdb_info_api(imdb_id_value, manual_language=meta.manual_language, base_dir=meta.base_dir, config=prep_instance.config)
-        meta.imdb_info = imdb_info
-
-    _reject_invalid_automatic_imdb(meta, filename)
+    if meta.category not in ("BOOK", "GAME", "XXX"):
+        await resolve_metadata(meta, filename, prep_instance.tmdb_manager, prep_instance.config, untouched_filename=untouched_filename)
 
     meta.populate_cast()
+    original_meta.update(meta)
 
 
 async def finalize_metadata(

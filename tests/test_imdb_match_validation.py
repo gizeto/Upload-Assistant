@@ -1,90 +1,40 @@
 # ruff: noqa: S101
 
-import asyncio
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from src.imdb import imdb_manager, imdb_match_rejection
 from src.meta import Meta
-from src.prep_helpers import _apply_derived_imdb_id, _reject_invalid_automatic_imdb
-from src.trackers.UNIT3D import UNIT3D
+from src.prep_helpers import _apply_derived_imdb_id
 
 
 @pytest.mark.parametrize(
-    ("filename", "title", "year", "imdb_id", "imdb_title", "imdb_year", "imdb_type"),
-    [
-        ("Minha Rua Imaginaria", "My Imaginary Street", 2023, 32345230, "157. Série Fictícia", 2024, "podcastEpisode"),
-        ("Vila Exemplo", "Example Village", 2021, 6868820, "Outra Série Exemplo", 2018, "tvSeries"),
-    ],
+    ("title_type", "accepted"),
+    [("movie", True), ("short", True), ("video", True), ("tvSpecial", True), ("tvShort", True), ("tvSeries", False), ("podcastEpisode", False), (None, False)],
 )
-def test_wrong_imdb_match_is_removed(filename, title, year, imdb_id, imdb_title, imdb_year, imdb_type):
-    meta = Meta(
-        category="MOVIE",
-        filename=filename,
-        title=title,
-        year=year,
-        imdb_id=imdb_id,
-        imdb_tt=f"tt{imdb_id}",
-        imdb=str(imdb_id),
-        imdb_info={"imdbID": f"tt{imdb_id}", "title": imdb_title, "year": imdb_year, "type": imdb_type},
-        aka=f"AKA {imdb_title}",
-    )
+def test_movie_match_requires_compatible_type(title_type, accepted):
+    info = {"title": "Example Movie", "year": 2020, "type": title_type}
 
-    _reject_invalid_automatic_imdb(meta, filename)
-
-    assert (meta.imdb_id, meta.imdb_tt, meta.imdb, meta.imdb_info, meta.aka, meta.no_imdb) == (0, "", "0", {}, "", True)
-    assert asyncio.run(UNIT3D.get_imdb(None, meta)) == {"imdb": "0"}
+    assert (imdb_match_rejection("MOVIE", 2020, ["Example Movie"], info) is None) is accepted
 
 
-def test_valid_automatic_imdb_is_kept():
-    meta = Meta(category="MOVIE", filename="Vila Exemplo", title="Example Village", year=2021, imdb_id=1234567)
-    meta.imdb_info = {"imdbID": "tt1234567", "title": "Vila Exémplo", "year": 2021, "type": "short"}
+@pytest.mark.parametrize(("expected_year", "imdb_year", "accepted"), [(None, 2020, True), (2020, None, False), (2020, 2017, False), (2020, 2018, True), (2020, 2023, False)])
+def test_movie_match_checks_available_years(expected_year, imdb_year, accepted):
+    info = {"title": "Example Movie", "year": imdb_year, "type": "movie"}
 
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert meta.imdb_id == 1234567
-    assert meta.no_imdb is False
+    assert (imdb_match_rejection("MOVIE", expected_year, ["Example Movie"], info) is None) is accepted
 
 
-def test_translated_title_is_accepted_when_tmdb_links_imdb():
-    meta = Meta(category="MOVIE", filename="Outro Titulo", title="Completely Different Translation", year=2023, imdb_id=1234567, tmdb_imdb_id=1234567)
-    meta.imdb_info = {"imdbID": "tt1234567", "title": "Original Foreign Title", "year": 2023, "type": "movie"}
+@pytest.mark.parametrize(
+    ("titles", "imdb_title", "accepted"),
+    [(["Vila Exemplo"], "Vila Exémplo", True), (["Different Translation", "Original Foreign Title"], "Original Foreign Title", True), (["Example Movie"], "Unrelated Movie", False), ([], "Example Movie", False)],
+)
+def test_movie_match_checks_titles(titles, imdb_title, accepted):
+    info = {"title": imdb_title, "year": 2020, "type": "movie"}
 
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert meta.imdb_id == 1234567
-
-
-def test_missing_imdb_details_are_not_used_automatically():
-    meta = Meta(category="MOVIE", filename="Example", title="Example", year=2023, imdb_id=1234567, imdb_tt="tt1234567", imdb_info={})
-
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert (meta.imdb_id, meta.imdb_tt, meta.no_imdb) == (0, "", True)
-
-
-def test_explicit_manual_imdb_is_preserved():
-    meta = Meta(category="MOVIE", filename="Example", title="Example", year=2023, imdb_manual="tt1234567", imdb_id=1234567, imdb_info={})
-
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert meta.imdb_id == 1234567
-
-
-@pytest.mark.parametrize("title_type", ["video", "tvSpecial", "tvShort"])
-def test_movie_compatible_imdb_types_are_kept(title_type):
-    meta = Meta(category="MOVIE", filename="Example", title="Example", year=2023, imdb_id=1234567)
-    meta.imdb_info = {"imdbID": "tt1234567", "title": "Example", "year": 2023, "type": title_type}
-
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert meta.imdb_id == 1234567
-
-
-def test_tmdb_link_does_not_override_incompatible_type():
-    candidate = {"imdbID": "tt1234567", "title": "Example", "year": 2023, "type": "podcastEpisode"}
-
-    assert imdb_match_rejection("MOVIE", 2023, ["Example"], candidate, tmdb_imdb_id=1234567)
+    assert (imdb_match_rejection("MOVIE", 2020, titles, info) is None) is accepted
 
 
 def test_invalid_derived_series_id_preserves_existing_imdb():
@@ -96,24 +46,13 @@ def test_invalid_derived_series_id_preserves_existing_imdb():
     assert (meta.imdb_id, meta.imdb_info, meta.aka, meta.no_imdb) == (1234567, original_info, "AKA Existing", False)
 
 
-def test_valid_derived_series_id_replaces_existing_imdb():
-    meta = Meta(category="TV", filename="Example", title="Example", year=2023, imdb_id=1234567, imdb_info={})
+@pytest.mark.parametrize("rejected", [False, True])
+def test_valid_derived_series_id_replaces_existing_imdb(rejected):
+    meta = Meta(category="TV", filename="Example", title="Example", year=2023, imdb_id=0 if rejected else 1234567, automatic_imdb_rejected=rejected)
     derived_info = {"imdbID": "tt7654321", "title": "Example", "year": 2023, "type": "tvSeries"}
 
     assert _apply_derived_imdb_id(meta, meta.filename, 7654321, derived_info) is True
-    assert (meta.imdb_id, meta.imdb_info) == (7654321, derived_info)
-
-
-def test_tvdb_id_can_recover_from_rejected_automatic_imdb():
-    meta = Meta(category="TV", filename="Example", title="Example", year=2023, imdb_id=1234567)
-    meta.imdb_info = {"imdbID": "tt1234567", "title": "Unrelated Podcast", "year": 2023, "type": "podcastEpisode"}
-
-    _reject_invalid_automatic_imdb(meta, meta.filename)
-
-    assert (meta.imdb_id, meta.no_imdb, meta.automatic_imdb_rejected) == (0, True, True)
-    derived_info = {"imdbID": "tt7654321", "title": "Example", "year": 2023, "type": "tvSeries"}
-    assert _apply_derived_imdb_id(meta, meta.filename, 7654321, derived_info) is True
-    assert (meta.imdb_id, meta.no_imdb, meta.automatic_imdb_rejected) == (7654321, False, False)
+    assert (meta.imdb_id, meta.imdb_info, meta.no_imdb, meta.automatic_imdb_rejected) == (7654321, derived_info, False, False)
 
 
 def test_explicit_no_imdb_still_blocks_tvdb_id():
@@ -124,75 +63,44 @@ def test_explicit_no_imdb_still_blocks_tvdb_id():
     assert (meta.imdb_id, meta.no_imdb, meta.automatic_imdb_rejected) == (None, True, False)
 
 
-class _Response:
-    def __init__(self, candidates):
-        self.candidates = candidates
+@pytest.fixture
+def search_results(monkeypatch):
+    candidates = []
 
-    def raise_for_status(self):
-        return None
+    async def post(_client, url, **_kwargs):
+        payload = {"data": {"advancedTitleSearch": {"edges": [{"node": {"title": candidate}} for candidate in candidates]}}}
+        return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
 
-    def json(self):
-        return {"data": {"advancedTitleSearch": {"edges": [{"node": {"title": candidate}} for candidate in self.candidates]}}}
-
-
-class _Client:
-    def __init__(self, candidates):
-        self.candidates = candidates
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    async def post(self, *_args, **_kwargs):
-        return _Response(self.candidates)
+    monkeypatch.setattr("src.imdb.httpx.AsyncClient.post", post)
+    return candidates
 
 
 def _candidate(imdb_id, title, year, title_type):
     return {"id": f"tt{imdb_id}", "titleText": {"text": title}, "releaseYear": {"year": year}, "titleType": {"text": title_type}}
 
 
-def test_single_incompatible_search_result_is_not_selected(monkeypatch):
-    monkeypatch.setattr("src.imdb.httpx.AsyncClient", lambda: _Client([_candidate(32345230, "157. Série Fictícia", 2024, "Podcast Episode")]))
+@pytest.mark.asyncio
+async def test_single_incompatible_search_result_is_not_selected(search_results):
+    search_results.append(_candidate(7654321, "Unrelated Podcast", 2024, "Podcast Episode"))
 
-    result = asyncio.run(imdb_manager.search_imdb("Minha Rua Imaginaria", 2023, category="MOVIE", unattended=True))
-
-    assert result == 0
-
-
-def test_unattended_search_skips_wrong_first_result(monkeypatch):
-    monkeypatch.setattr(
-        "src.imdb.httpx.AsyncClient",
-        lambda: _Client([_candidate(6868820, "Outra Série Exemplo", 2018, "TV Series"), _candidate(1234567, "Vila Exémplo", 2021, "Short")]),
-    )
-
-    result = asyncio.run(imdb_manager.search_imdb("Vila Exemplo", 2021, category="MOVIE", unattended=True))
-
-    assert result == 1234567
+    assert await imdb_manager.search_imdb("Example Movie", 2023, category="MOVIE", unattended=True) == 0
 
 
-def test_quick_search_skips_wrong_first_result(monkeypatch):
-    monkeypatch.setattr(
-        "src.imdb.httpx.AsyncClient",
-        lambda: _Client([_candidate(6868820, "Outra Série Exemplo", 2018, "TV Series"), _candidate(1234567, "Vila Exémplo", 2021, "Short")]),
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quickie", [False, True])
+async def test_unattended_search_skips_wrong_first_result(search_results, quickie):
+    search_results.extend([_candidate(7654321, "Unrelated Series", 2018, "TV Series"), _candidate(1234567, "Vila Exémplo", 2021, "Short")])
 
-    result = asyncio.run(imdb_manager.search_imdb("Vila Exemplo", 2021, category="MOVIE", quickie=True, unattended=True))
-
-    assert result == 1234567
+    assert await imdb_manager.search_imdb("Vila Exemplo", 2021, category="MOVIE", quickie=quickie, unattended=True) == 1234567
 
 
-def test_attended_selection_marks_incompatible_id_as_manual(monkeypatch):
-    monkeypatch.setattr("src.imdb.httpx.AsyncClient", lambda: _Client([_candidate(6868820, "Outra Série Exemplo", 2018, "TV Series")]))
-
-    async def select_first(*_args, **_kwargs):
-        return "1"
-
-    monkeypatch.setattr("src.imdb.prompt_in_thread", select_first)
+@pytest.mark.asyncio
+async def test_attended_selection_marks_incompatible_id_as_manual(monkeypatch, search_results):
+    search_results.append(_candidate(7654321, "Unrelated Series", 2018, "TV Series"))
+    monkeypatch.setattr("src.imdb.prompt_in_thread", AsyncMock(return_value="1"))
     selected = []
 
-    result = asyncio.run(imdb_manager.search_imdb("Vila Exemplo", 2021, category="MOVIE", on_manual_selection=selected.append))
+    result = await imdb_manager.search_imdb("Vila Exemplo", 2021, category="MOVIE", on_manual_selection=selected.append)
 
-    assert result == 6868820
-    assert selected == [6868820]
+    assert result == 7654321
+    assert selected == [7654321]

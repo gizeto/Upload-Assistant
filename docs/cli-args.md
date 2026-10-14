@@ -104,11 +104,16 @@ If you pass a `.txt` file as the main positional input path (without specifying 
   - Also accepts TMDb URLs and extracts the id.
   - Sets category based on `movie` vs `tv` when provided in that form.
 - `-imdb`, `--imdb IMDB_ID`: IMDb id.
+- `--no-imdb`: Skip IMDb lookup and metadata.
 - `-mal`, `--mal MAL_ID`: MAL id.
 - `-tvmaze`, `--tvmaze TVMAZE_ID`: TVMaze id.
 - `-tvdb`, `--tvdb TVDB_ID`: TVDB id.
 
 Note: if a manual TMDb or IMDb id is present in the incoming `meta` before parsing, the parser clears `tmdb_manual`, `tmdb_id`, `tmdb`, `imdb_id`, `imdb` in `meta` so CLI values take precedence cleanly.
+
+Movie and TV lookups collect TMDb and IMDb candidates in parallel. TMDb's linked IMDb entry is preferred after its type, year, and title or aliases are checked. If the link is incorrect or missing, matching independent IMDb candidates are tried. TV episode IDs are resolved to their parent series, and series metadata is compared using the premiere year.
+
+When a match remains uncertain, the interactive chooser accepts a candidate number, `movie/123`, `tv/123`, `tt1234567`, `search Example Title 2020`, or `skip` to keep verified IDs and leave the remaining IDs unresolved. Conflicting explicit IDs can be resolved by selecting which ID to keep, or confirmed with `keep`. Unattended runs retain verified IDs and leave uncertain IDs unresolved; conflicting explicit IDs produce an error. Rejecting a candidate keeps lookup enabled for later attempts, while skipping an unresolved IMDb match or using `--no-imdb` disables IMDb lookup. Temporary service failures are retried, and previously validated cached metadata can be reused.
 
 ### Book and audiobook metadata
 
