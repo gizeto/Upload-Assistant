@@ -13,6 +13,12 @@ config: dict[str, Any] = {
         # Set to True to play a bell sound before release confirmation (CLI and WebUI).
         # WebUI sound plays in the browser; allow site audio and keep the tab unmuted.
         "sfx_on_prompt": True,
+        # Set to True to keep WebUI uploads running after their browser tab closes or disconnects.
+        # Reopen the WebUI to resume watching them. Set to False to kill an upload when its tab disconnects.
+        "webui_keep_uploads_on_disconnect": True,
+        # Minutes a WebUI upload may wait at an unanswered prompt with no browser connected before it is killed.
+        # Set to 0 to wait indefinitely.
+        "webui_unattended_prompt_timeout": 60,
         # Set to True to apply argument overrides from data/templates/user-args.json.
         "user_overrides": False,
         # Apply --personalrelease when the detected release group matches any tag (case-insensitive).
@@ -499,6 +505,11 @@ config: dict[str, Any] = {
         # For example, 20 excludes a duplicate that is at least 20% larger or smaller.
         # Set to None or remove this setting to disable the feature.
         "dupe_size_difference_tolerance": None,
+        # Check MOVIE and TV duplicates against each tracker's slot rules, where Upload Assistant has them.
+        # Shows a recommendation (upload / don't upload / review) with the date of the rules it is based on.
+        # In unattended mode the recommendation decides whether to upload; when it can't decide, the basic check is used.
+        # Default: True (also when this setting is missing).
+        "slot_rules": True,
         # See docs/upload-order-and-bandwidth-control.md for workflows and qBittorrent requirements.
         "upload_order": "concurrent",
         "qbit_bandwidth_control": False,
