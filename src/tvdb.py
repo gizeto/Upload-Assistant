@@ -14,9 +14,11 @@ from urllib.error import URLError
 import httpx
 
 from src.console import logger
+from src.meta import Meta
 from src.metadata_cache import cache_for, is_cache_miss
 
 YEAR_PATTERN = re.compile(r"\((19\d\d|20[0-3]\d)\)")
+NAMING_YEAR_PATTERN = re.compile(r"\s+\(((?:18|19|20|21)\d{2})\)\s*$")
 
 
 tvdb: TVDB | None = None
@@ -78,6 +80,40 @@ def _best_effort_series_year(series_info: dict[str, Any] | None) -> str | None:
         return None
 
     return _extract_year_from_text(series_info.get("year")) or _extract_year_from_text(series_info.get("slug"))
+
+
+def _naming_year_qualifier(title: str) -> str:
+    match = NAMING_YEAR_PATTERN.search(title)
+    return match[1] if match else ""
+
+
+def _naming_title_key(title: str) -> str:
+    title = NAMING_YEAR_PATTERN.sub("", title)
+    return "".join(char for char in unicodedata.normalize("NFKC", title).casefold() if char.isalnum())
+
+
+async def _has_series_title_collision(client: TVDB, title: str, series_id: int) -> bool:
+    """Search all years and languages for the same title under another ID."""
+    query = NAMING_YEAR_PATTERN.sub("", title)
+    selected_key = _naming_title_key(title)
+    offset = 0
+    seen_pages: set[str] = set()
+    while True:
+        results = await client.search(query, type="series", limit=100, offset=offset)
+        fingerprint = json.dumps(results, sort_keys=True)
+        if fingerprint in seen_pages:
+            raise ValueError("TVDB search repeated a page")
+        seen_pages.add(fingerprint)
+        for result in results:
+            translations = result.get("translations") or {}
+            name = translations.get("eng") if isinstance(translations, dict) else None
+            name = name or result.get("name") or ""
+            result_id = str(result.get("tvdb_id") or result.get("id") or "").removeprefix("series-")
+            if result_id.isdigit() and int(result_id) != series_id and _naming_title_key(str(name)) == selected_key:
+                return True
+        if len(results) < 100:
+            return False
+        offset += len(results)
 
 
 async def _series_translation_metadata(
@@ -283,6 +319,40 @@ def _get_tvdb_or_warn(config: dict[str, Any] | None = None) -> TVDB | None:
 class TvdbData:
     def __init__(self, config: Any) -> None:
         self.config = config
+
+    async def get_naming_year(self, meta: Meta) -> str:
+        """Include a year only for an explicit TVDB qualifier or a title collision."""
+        episode_data = meta.tvdb_episode_data if isinstance(meta.tvdb_episode_data, dict) else {}
+        titles = [title.strip() for title in (meta.tvdb_series_name, episode_data.get("series_name"), episode_data.get("series_title")) if isinstance(title, str) and title.strip()]
+        for title in titles:
+            if year := _naming_year_qualifier(title):
+                return year
+        title = titles[0] if titles else ""
+        if not meta.tvdb_id:
+            return ""
+        key = json.dumps({"id": meta.tvdb_id, "title": title, "year": meta.year, "first_aired": meta.first_air_date}, sort_keys=True)
+        cache = cache_for(meta.base_dir, self.config)
+        try:
+            cached = await cache.get("tvdb", "naming_year", key)
+            if not is_cache_miss(cached) and isinstance(cached, dict):
+                return str(cached.get("year") or "")
+            client = _get_tvdb_or_warn(self.config)
+            if client is None:
+                return ""
+            series_year = str(meta.first_air_date or "")[:4] or meta.year
+            if not title:
+                info = await client.get_series_extended(int(meta.tvdb_id))
+                translated = await _series_translation_metadata(client, int(meta.tvdb_id), _as_dict_list(info.get("aliases", [])), _series_info=info)
+                title = str(translated.get("series_title") or info.get("name") or "")
+                series_year = info.get("year") or str(info.get("firstAired") or "")[:4] or meta.year
+            year = _naming_year_qualifier(title)
+            if not year and title and await _has_series_title_collision(client, title, int(meta.tvdb_id)):
+                year = str(series_year or "")
+            await cache.set("tvdb", "naming_year", key, {"year": year})
+            return year
+        except Exception as error:
+            logger.warning(f"Could not determine naming year from TVDB: {error}")
+            return ""
 
     async def get_season_episode_numbers(self, series_id: int, season: int) -> list[int] | None:
         """Fetch a fresh, fully paginated season in TVDB's default episode order.

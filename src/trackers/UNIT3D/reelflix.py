@@ -1,9 +1,9 @@
 # Upload Assistant © 2025 Audionut & wastaken7 — Licensed under UAPL v1.0
-import re
 from typing import Any
 
 from src.meta import Meta
 from src.trackers.common import Common
+from src.trackers.naming import INVALID_GROUP_TAGS, remove_invalid_group_tag
 from src.trackers.UNIT3D import UNIT3D
 
 Config = dict[str, Any]
@@ -37,14 +37,9 @@ class ReelFlix(UNIT3D):
 
     async def get_name(self, meta: Meta) -> dict[str, str]:
         rf_name = meta.name
-        tag_value = meta.tag or ""
-        tag_lower = tag_value.lower()
-        invalid_tags = ["nogrp", "nogroup", "unknown", "-unk-"]
-
-        if tag_value == "" or any(invalid_tag in tag_lower for invalid_tag in invalid_tags):
-            for invalid_tag in invalid_tags:
-                rf_name = re.sub(f"-{invalid_tag}", "", rf_name, flags=re.IGNORECASE)
-            rf_name = f"{rf_name}-NoGroup"
+        tag = (meta.tag or "").strip("- ").casefold()
+        if not tag or tag in INVALID_GROUP_TAGS:
+            rf_name = f"{remove_invalid_group_tag(rf_name)}-NoGroup"
 
         return {"name": rf_name}
 

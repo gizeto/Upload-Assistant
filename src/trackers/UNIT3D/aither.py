@@ -1,12 +1,16 @@
 # Upload Assistant © 2025 Audionut & wastaken7 — Licensed under UAPL v1.0
 import re
+from dataclasses import replace
 from typing import Any
 
 from src.console import logger
+from src.get_name import build_name_components
 from src.meta import Meta
+from src.tmdb import get_tmdb_primary_title
 from src.trackers.common import Common
-from src.trackers.naming import BLU_EDITION_TERMS, VideoNameRules, add_incomplete_pack_marker, build_video_name
+from src.trackers.naming import BLU_EDITION_TERMS, VideoNameRules, add_incomplete_pack_marker, build_video_name, remove_invalid_group_tag, select_aka
 from src.trackers.UNIT3D import UNIT3D
+from src.tvdb import TvdbData
 
 # Aither keeps editions (Criterion, Remastered, Anniversary...) in the description; cuts stay in the title.
 AITHER_EDITION_TERMS = re.compile(
@@ -21,6 +25,7 @@ AITHER_NAME_RULES = VideoNameRules(
     dvd_video_codec=True,
     three_d_slot="source_on_discs",
     honor_manual_year_on_tv=True,
+    tv_year_from_tvdb=False,
 )
 
 
@@ -126,8 +131,19 @@ class Aither(UNIT3D):
         return data
 
     async def get_name(self, meta: Meta):
-        # A manual --name or a type outside the guide falls back to the generic name.
-        aither_name = await build_video_name(meta, AITHER_NAME_RULES, self.tracker) or meta.name
+        aither_name = meta.name
+        if meta.manual_name is not None:
+            aither_name = str(meta.manual_name).strip()
+        else:
+            if str(meta.type).upper() in ("DISC", "REMUX", "ENCODE", "WEBDL", "WEBRIP", "HDTV", "DVDRIP") and meta.category in ("MOVIE", "TV") and not meta.is_sports:
+                meta = meta.copy()
+                meta.title, meta.original_title = await get_tmdb_primary_title(meta, self.config)
+                meta.aka = select_aka(meta, meta.title)
+                components = build_name_components(meta)
+                if meta.category == "TV" and not meta.no_year and (meta.manual_year or 0) <= 0:
+                    components = replace(components, year=await TvdbData(self.config).get_naming_year(meta))
+                aither_name = await build_video_name(meta, AITHER_NAME_RULES, self.tracker, components) or aither_name
+            aither_name = remove_invalid_group_tag(aither_name)
         if meta.trump_reason == "exact_match":
             aither_name = aither_name + " - TRUMP"
         return {"name": add_incomplete_pack_marker(aither_name, meta, self.tracker)}

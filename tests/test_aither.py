@@ -95,6 +95,7 @@ def _movie(**overrides: object) -> Meta:
         "language_checked": True,
     }
     fields.update(overrides)
+    fields.setdefault("tmdb_title", fields["title"])
     return Meta(**fields)
 
 
@@ -183,7 +184,7 @@ def test_aither_builds_full_disc_names_without_language(meta: Meta, expected: st
     ("meta", "expected"),
     [
         (_tv(), "Synthetic Show S01 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"),
-        (_tv(search_year="2021", year=2021, episode="E08"), "Synthetic Show 2021 S01E08 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"),
+        (_tv(tvdb_series_name="Synthetic Show (2021)", year=2021, episode="E08"), "Synthetic Show 2021 S01E08 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"),
         (
             _tv(episode="E01", manual_episode_title="Imaginary Storm", audio_languages=["French"], original_language="fr", service="ATVP", resolution="720p"),
             "Synthetic Show S01E01 Imaginary Storm FRENCH 720p ATVP WEB-DL DD+ 5.1 H.264-TESTGROUP",
@@ -197,7 +198,7 @@ def test_aither_builds_full_disc_names_without_language(meta: Meta, expected: st
             "Synthetic Show S01 FRENCH 576p DVDRip DD 2.0 x264-TESTGROUP",
         ),
         (
-            _tv(type="DISC", is_disc="BDMV", source="Blu-ray", region="USA", audio="DTS-HD MA 2.0", search_year="2019", year=2019, season="S02"),
+            _tv(type="DISC", is_disc="BDMV", source="Blu-ray", region="USA", audio="DTS-HD MA 2.0", tvdb_series_name="Synthetic Show (2019)", year=2019, season="S02"),
             "Synthetic Show 2019 S02 1080p USA Blu-ray AVC DTS-HD MA 2.0-TESTGROUP",
         ),
         (_tv(manual_date="2024-01-02", daily_episode_title="2024-01-02"), "Synthetic Show 2024-01-02 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"),
@@ -208,14 +209,14 @@ def test_aither_builds_tv_names(meta: Meta, expected: str) -> None:
 
 
 def test_aither_places_aka_before_movie_year() -> None:
-    meta = _movie(aka="AKA Alternate Feature")
+    meta = _movie(imdb_info={"aka": "Alternate Feature"})
 
     assert _name(meta) == "Synthetic Feature AKA Alternate Feature 2024 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"
 
 
 def test_aither_places_aka_before_tv_year_and_keeps_space_without_year() -> None:
-    assert _name(_tv(aka="AKA Alternate Show", search_year="2024", year=2024)) == "Synthetic Show AKA Alternate Show 2024 S01 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"
-    assert _name(_tv(aka="AKA Alternate Show", year=2024)) == "Synthetic Show AKA Alternate Show S01 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"
+    assert _name(_tv(imdb_info={"aka": "Alternate Show"}, tvdb_series_name="Synthetic Show (2024)", year=2024)) == "Synthetic Show AKA Alternate Show 2024 S01 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"
+    assert _name(_tv(imdb_info={"aka": "Alternate Show"}, year=2024)) == "Synthetic Show AKA Alternate Show S01 1080p NF WEB-DL DD+ 5.1 H.264-TESTGROUP"
 
 
 def test_aither_honors_manual_year_for_tv() -> None:
