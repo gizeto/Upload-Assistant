@@ -259,6 +259,56 @@ async def test_cancelling_run_ffmpeg_terminates_only_its_owned_process(tmp_path,
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires a SIGTERM handler")
+async def test_cancelling_run_ffmpeg_drains_output_during_termination(tmp_path, monkeypatch):
+    ready = tmp_path / "ready"
+    processes = []
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def create_process(*args, **kwargs):
+        process = await original_create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(takescreens.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(takescreens, "default_config", {})
+    monkeypatch.setattr(takescreens.asyncio, "create_subprocess_exec", create_process)
+
+    class Command:
+        def compile(self):
+            script = (
+                "import os, pathlib, signal, sys, time\n"
+                "def stop(*_args):\n"
+                "    for _ in range(512):\n"
+                "        os.write(2, b'x' * 4096)\n"
+                "    sys.exit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "pathlib.Path(sys.argv[1]).touch()\n"
+                "time.sleep(60)\n"
+            )
+            return [sys.executable, "-c", script, str(ready)]
+
+    task = asyncio.create_task(takescreens.run_ffmpeg(Command()))
+    try:
+        for _ in range(300):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert ready.exists(), "subprocess did not install its SIGTERM handler"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert processes[0].returncode == 0, "subprocess output was not drained during graceful termination"
+    finally:
+        if not task.done():
+            task.cancel()
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.communicate(), timeout=3)
+
+
+@pytest.mark.asyncio
 async def test_determine_tonemapping_uses_verified_libplacebo(monkeypatch, tmp_path):
     meta = Meta(hdr="HDR")
     compatibility_calls = []
@@ -316,7 +366,9 @@ async def test_capture_screenshot_applies_selected_libplacebo_tonemapping(monkey
 
 
 @pytest.mark.asyncio
-async def test_dvd_screenshots_uses_complete_title_set_and_ifo_duration(monkeypatch, tmp_path):
+@pytest.mark.parametrize("dvd_title,failed_indices", [(None, ()), (2, ()), (2, (0, 2)), (2, (0, 1, 2))])
+@pytest.mark.parametrize("reuse_image", [False, True])
+async def test_dvd_screenshots_uses_complete_title_set_and_ifo_duration(monkeypatch, tmp_path, dvd_title, failed_indices, reuse_image):
     disc_path = tmp_path / "VIDEO_TS"
     disc_path.mkdir()
     main_set = ["01_0.VOB", "01_1.VOB", "01_2.VOB", "01_3.VOB"]
@@ -338,17 +390,34 @@ async def test_dvd_screenshots_uses_complete_title_set_and_ifo_duration(monkeypa
         assert retake is False
         return ["100", "1500", "2700"]
 
-    async def capture_stub(task):
+    async def capture_stub(task, *, vob_fallback=True):
         index, source, image, seek_time, *_rest = task
+        if index in failed_indices and not vob_fallback:
+            return index, None
         Image.effect_noise((720, 480), 20).save(image)
         captured.append((index, source, seek_time))
         return index, image
 
     monkeypatch.setattr(takescreens.MediaInfo, "parse", parse_stub)
     monkeypatch.setattr(takescreens, "valid_ss_time", valid_times_stub)
+    batches = []
+
+    async def batch_stub(tasks):
+        batches.append([task[0] for task in tasks])
+        return [await capture_stub(task) for task in tasks]
+
+    async def matching_title(*_args):
+        return dvd_title
+
+    async def frame_info_stub(_source, timestamp, _meta, **_kwargs):
+        return {"pts_time": float(timestamp)}
+
+    monkeypatch.setattr(takescreens, "matching_dvd_title", matching_title)
+    monkeypatch.setattr(takescreens, "get_frame_info", frame_info_stub)
+    monkeypatch.setattr(takescreens, "capture_dvd_batch", batch_stub)
     monkeypatch.setattr(takescreens, "capture_dvd_screenshot", capture_stub)
     monkeypatch.setattr(takescreens, "register_screenshots", lambda *_args: [])
-    monkeypatch.setattr(takescreens, "default_config", {"scale_screenshots_for_par": False, "scale_dvd_screenshots_for_par": True})
+    monkeypatch.setattr(takescreens, "default_config", {"scale_screenshots_for_par": False, "scale_dvd_screenshots_for_par": True, "frame_overlay": True})
 
     def scale_stub(_width, _height, _par, _dar, enabled):
         scaling_choices.append(enabled)
@@ -363,17 +432,24 @@ async def test_dvd_screenshots_uses_complete_title_set_and_ifo_duration(monkeypa
         discs=[{"name": "DVD", "path": str(disc_path), "main_set": main_set}],
         image_list=[],
         retake=False,
-        frame_overlay=False,
+        frame_overlay=True,
         tv_pack=False,
         debug=False,
         ffdebug=False,
     )
+    if reuse_image:
+        existing = takescreens.screenshots_dir(tmp_path, meta.uuid) / "DVD-0.png"
+        Image.effect_noise((720, 480), 20).save(existing)
     await takescreens.dvd_screenshots(meta, 0, cleanup_after_capture=False)
 
     expected_source = "concat:" + "|".join(str(disc_path / f"VTS_{vob}") for vob in main_set[1:])
-    assert [source for _index, source, _time in captured] == [expected_source] * 3
-    assert [time for _index, _source, time in captured] == ["100", "1500", "2700"]
+    expected_indices = [1, 2] if reuse_image else [0, 1, 2]
+    expected_times = ["1500", "2700"] if reuse_image else ["100", "1500", "2700"]
+    assert sorted(captured) == list(zip(expected_indices, [expected_source] * len(expected_indices), expected_times))
+    assert meta.frame_info_map == {timestamp: {"pts_time": float(timestamp)} for timestamp in expected_times}
     assert scaling_choices == [True]
+    expected_batch = expected_indices if dvd_title is None else [index for index in expected_indices if index in failed_indices]
+    assert batches == ([expected_batch] if expected_batch else [])
 
 
 @pytest.mark.asyncio
@@ -393,7 +469,7 @@ async def test_dvd_capture_marks_png_as_single_image(monkeypatch, tmp_path):
 
     assert result == (0, str(output))
     assert commands[0][commands[0].index("-update") + 1] == "1"
-    assert commands[0].index("-ss") > commands[0].index("-i")
+    assert "trim=start=10.0:duration=1" in commands[0][commands[0].index("-filter_complex") + 1]
 
 
 @pytest.mark.asyncio
@@ -420,15 +496,18 @@ async def test_dvd_capture_seeks_with_dvdvideo_title(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dvd_capture_falls_back_when_dvdvideo_is_unavailable(monkeypatch, tmp_path):
+@pytest.mark.parametrize("title_exit_code", [0, 1])
+async def test_dvd_capture_falls_back_when_title_produces_no_image(monkeypatch, tmp_path, title_exit_code):
     output = tmp_path / "frame.png"
+    output.write_bytes(b"old image")
     source = tmp_path / "VIDEO_TS" / "VTS_01_1.VOB"
     commands = []
 
     async def run_stub(command):
         commands.append(takescreens.compile_ffmpeg_command(command))
+        assert not output.exists()
         if len(commands) == 1:
-            return 1, b"", b"Unknown input format: dvdvideo"
+            return title_exit_code, b"", b"Unknown input format: dvdvideo" if title_exit_code else b""
         output.write_bytes(b"png")
         return 0, b"", b""
 
@@ -439,8 +518,10 @@ async def test_dvd_capture_falls_back_when_dvdvideo_is_unavailable(monkeypatch, 
 
     assert result == (0, str(output))
     assert len(commands) == 2
+    assert "dvdvideo" in commands[0]
     assert "dvdvideo" not in commands[1]
-    assert commands[1].index("-ss") > commands[1].index("-i")
+    assert "trim=start=100.0:duration=1" in commands[1][commands[1].index("-filter_complex") + 1]
+    assert commands[1][commands[1].index("-loglevel") + 1] == "error"
 
 
 @pytest.mark.asyncio
@@ -525,6 +606,10 @@ async def test_dvd_retake_uses_only_valid_replacement(monkeypatch, tmp_path, ret
 
     monkeypatch.setattr(takescreens.MediaInfo, "parse", parse_stub)
     monkeypatch.setattr(takescreens, "valid_ss_time", valid_times_stub)
+    async def batch_stub(tasks):
+        return [await capture_stub(task) for task in tasks]
+
+    monkeypatch.setattr(takescreens, "capture_dvd_batch", batch_stub)
     monkeypatch.setattr(takescreens, "capture_dvd_screenshot", capture_stub)
     monkeypatch.setattr(takescreens, "register_screenshots", register_stub)
     monkeypatch.setattr(takescreens, "screenshot_par_scale_factors", lambda *_args: (1.0, 1.0))
@@ -586,6 +671,10 @@ async def test_dvd_replaces_blank_registered_screenshot(monkeypatch, tmp_path):
 
     monkeypatch.setattr(takescreens.MediaInfo, "parse", parse_stub)
     monkeypatch.setattr(takescreens, "valid_ss_time", valid_times_stub)
+    async def batch_stub(tasks):
+        return [await capture_stub(task) for task in tasks]
+
+    monkeypatch.setattr(takescreens, "capture_dvd_batch", batch_stub)
     monkeypatch.setattr(takescreens, "capture_dvd_screenshot", capture_stub)
     monkeypatch.setattr(takescreens, "screenshot_par_scale_factors", lambda *_args: (1.0, 1.0))
 

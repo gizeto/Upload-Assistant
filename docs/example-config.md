@@ -124,6 +124,7 @@ Implementation notes:
 - `overlay_layout` (str, default `"stacked"`): Use separate lines (`"stacked"`) or a compact row separated by bullets (`"single_line"`).
 - `scale_screenshots_for_par` (bool): When `False` (the default), preserve MediaInfo's coded dimensions. Set to `True` only to apply pixel-aspect-ratio correction for non-square-pixel sources; this can change a PNG from `1920x1040` to `1924x1040`.
 - `scale_dvd_screenshots_for_par` (bool): Apply PAR scaling to DVD screenshots and automatically captured DVD menus. Defaults to `True` for display-corrected dimensions; set to `False` to preserve coded dimensions. This setting is independent of `scale_screenshots_for_par`.
+- `dvd_screenshot_timeout` (int): Maximum seconds per DVD screenshot attempt or single-pass VOB batch (default `1800`). Increase it for slow storage or long titles. Long-running attempts report their status every 30 seconds; timed-out FFmpeg processes are terminated and incomplete images are removed. Without a matching seekable DVD title, screenshots share one sequential decoding pass instead of repeatedly decoding from the beginning for each image.
 
 See the [frame and screenshot overlay guide](screenshot-overlays.md) for help configuring **Frame Number, Frame Type, Timestamp and Tonemapped labels**. It includes images of stacked and single-line overlays, a copyable config example and guidance for existing configs.
 

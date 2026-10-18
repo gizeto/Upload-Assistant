@@ -163,7 +163,8 @@ def test_timestamp_only_reaches_each_ffmpeg_capture_backend(tmp_path, monkeypatc
     else:
         task = takescreens.capture_screenshot((0, str(source), 1.26, str(output), 1280, 720, 1, 1, 'quiet', False, meta))
     assert asyncio.run(task) == (0, str(output))
-    filters = commands[0][commands[0].index('-vf') + 1]
+    filter_option = '-filter_complex' if backend == 'dvd' else '-vf'
+    filters = commands[0][commands[0].index(filter_option) + 1]
     assert 'Timestamp' in filters and 'pts\\:hms\\:1.260000' in filters
     assert 'Frame Number' not in filters and 'Frame Type' not in filters and 'Tonemapped' not in filters
 
