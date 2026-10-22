@@ -432,10 +432,11 @@ def test_orpheus_preserves_multiple_artists_and_release_namespace():
 
     assert payload["artists[]"] == ["Example MC", "Example Rapper"]
     assert payload["importance[]"] == [1, 1]
-    assert payload["record_label"] == "Fictional Records"
-    assert payload["catalogue_number"] == "FIC0001-02"
-    assert "remaster_record_label" not in payload
-    assert "remaster_catalogue_number" not in payload
+    # Orpheus stores release information only in its edition fields.
+    assert payload["remaster_record_label"] == "Fictional Records"
+    assert payload["remaster_catalogue_number"] == "FIC0001-02"
+    assert payload["remaster_year"] == "2011"
+    assert not {"record_label", "catalogue_number", "remaster"} & set(payload)
     assert [entry for entry in adapter._form_data(payload) if entry[0] == "artists[]"] == [("artists[]", "Example MC"), ("artists[]", "Example Rapper")]
 
 
@@ -491,7 +492,18 @@ def test_orpheus_debug_renders_payload_without_public_cover_url():
     """Debug must inspect an embedded/local cover without hosting or blocking."""
     release = MusicRelease(root=".")
     release.tracks.append(
-        AudioTrack(path="single.flac", relative_path="single.flac", format="FLAC", codec="FLAC", bit_depth=16, sample_rate=44_100, title="Single", track_number=1)
+        AudioTrack(
+            path="single.flac",
+            relative_path="single.flac",
+            format="FLAC",
+            codec="FLAC",
+            bit_depth=16,
+            sample_rate=44_100,
+            title="Single",
+            track_number=1,
+            artist="Artist",
+            album="Album",
+        )
     )
     for field, value in {"artist": "Artist", "artists": ["Artist"], "album": "Album", "year": "2024", "media": "WEB", "release_type": "Single"}.items():
         release.set_field(field, value, MetadataSource.FILE_TAG, 1.0)
@@ -528,7 +540,7 @@ def test_orpheus_uses_concrete_release_year_for_required_edition_year():
 
     payload = Orpheus({"TRACKERS": {"ORPHEUS": {}}}).build_upload_payload(Meta(category="MUSIC"), release)
 
-    assert payload["remaster"] == 0
+    assert "remaster" not in payload
     assert payload["remaster_year"] == "2026"
     assert not release.get("edition_year")
 
@@ -547,7 +559,7 @@ def test_orpheus_rejects_mixed_audio_formats_when_building_payload():
         Orpheus({"TRACKERS": {"ORPHEUS": {}}}).build_upload_payload(Meta(category="MUSIC"), release)
 
 
-def test_orpheus_marks_explicit_edition_metadata_as_remaster():
+def test_orpheus_sends_explicit_edition_year_in_edition_fields():
     release = MusicRelease(root=".")
     release.tracks.append(AudioTrack(path="track.flac", relative_path="track.flac", format="FLAC", codec="FLAC"))
     for field, value in {
@@ -563,7 +575,7 @@ def test_orpheus_marks_explicit_edition_metadata_as_remaster():
 
     payload = Orpheus({"TRACKERS": {"ORPHEUS": {}}}).build_upload_payload(Meta(category="MUSIC"), release)
 
-    assert payload["remaster"] == 1
+    assert "remaster" not in payload
     assert payload["remaster_year"] == "2024"
 
 
@@ -915,19 +927,23 @@ def test_music_prep_runs_shared_client_path_lookup_before_returning():
     client = object()
     hash_ids = ["infohash", "torrent_hash", "skip_auto_torrent"]
     tracker_ids = ["orpheus"]
+    calls: list[str] = []
 
     with (
         patch("src.prep.prep_helpers.init_meta", return_value=(False, False, client, False, hash_ids, tracker_ids)),
         patch("src.prep.prep_helpers.detect_disc_and_category", new=AsyncMock(return_value=("", {}))),
         patch.object(Prep, "_gather_music_prep", new=AsyncMock()),
-        patch("src.prep.prep_helpers.process_trackers_and_torrent", new=AsyncMock()) as process_trackers,
-        patch("src.prep._enrich_music_from_orpheus_fn", new=AsyncMock()) as enrich_orpheus,
+        patch("src.prep.prep_helpers.process_trackers_and_torrent", new=AsyncMock(side_effect=lambda *_: calls.append("trackers"))) as process_trackers,
+        patch("src.prep.restart_early_artifact_tasks", new=AsyncMock(side_effect=lambda *_: calls.append("early"))) as restart_early,
+        patch("src.prep._enrich_music_from_orpheus_fn", new=AsyncMock(side_effect=lambda *_: calls.append("orpheus"))) as enrich_orpheus,
         patch("src.prep._enrich_music_from_discogs_fn", new=AsyncMock()) as enrich_discogs,
     ):
         result = asyncio.run(prep.gather_prep(meta, "cli"))
 
     assert result is meta
     process_trackers.assert_awaited_once_with(prep, meta, client, hash_ids, tracker_ids, "", "")
+    restart_early.assert_awaited_once_with(meta, client, prep.config)
+    assert calls == ["trackers", "early", "orpheus"]
     enrich_orpheus.assert_awaited_once_with(meta, prep.config)
     enrich_discogs.assert_awaited_once_with(meta, prep.config)
 

@@ -41,9 +41,9 @@ import web_ui.auth as auth_mod
 from src.webui_progress import PROGRESS_STDOUT_PREFIX
 from src.prompt_sound import PROMPT_SOUND_STDOUT_MARKER
 from src.app_paths import CODE_DIR, DATA_DIR, STATE_DIR
-from src.webui_paths import MAX_UPLOAD_PATHS, QUEUE_ENV, QUEUE_HASH_ENV, ROOTS_ENV, InspectedDirectories, validate_argument_paths, validate_content_path
+from src.webui_paths import MAX_UPLOAD_PATHS, QUEUE_ENV, QUEUE_HASH_ENV, ROOTS_ENV, InspectedDirectories, generated_queue_name, validate_argument_paths, validate_content_path
 from src.args import cli_argument_catalog, tracker_cli_aliases
-from src.config_sync import ConfigSyncError, ConfigWriteConflict, config_write_lock, replace_config_source
+from src.config_sync import ConfigSyncError, ConfigWriteConflictError, config_write_lock, replace_config_source
 from src.external_tools import EXTERNAL_TOOL_KEYS, check_external_tools
 from src.meta import Meta
 from src.version import __version__
@@ -96,6 +96,7 @@ class _ResponseLike(Protocol):
 
     def set_cookie(self, key: str, value: str, max_age: int | None = None, httponly: bool = False, secure: bool = False, samesite: str | None = None) -> None: ...
     def delete_cookie(self, key: str) -> None: ...
+    def get_json(self, silent: bool = False) -> object: ...
 
 
 class _ConsoleLike(Protocol):
@@ -143,6 +144,7 @@ class _LimiterLike(Protocol):
         key_func: Callable[[], str] | None = None,
         error_message: str | None = None,
         override_defaults: bool = True,
+        deduct_when: Callable[[_ResponseLike], bool] | None = None,
     ) -> Callable[[Callable[..., object]], Callable[..., object]]: ...
 
 
@@ -289,7 +291,7 @@ def _cfg_read(name: str) -> str | None:
 def _cfg_write(name: str, value: str) -> None:
     p = _cfg_file_path(name)
     with contextlib.suppress(Exception):
-        p.write_text(value, encoding="utf-8")
+        auth_mod.write_private_text(p, value)
 
 
 def _cfg_delete(name: str) -> None:
@@ -404,7 +406,7 @@ app.secret_key = session_secret
 # Configure server-side filesystem sessions (persisted under config dir)
 cfg_dir = auth_mod.get_config_dir()
 sess_dir = cfg_dir / "sessions"
-sess_dir.mkdir(parents=True, exist_ok=True)
+sess_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 app.config["SESSION_TYPE"] = "filesystem"
 app.config["SESSION_PERMANENT"] = False
 # Ensure permanent sessions (when set) expire after 30 days to match remember-me cookie
@@ -418,7 +420,7 @@ try:
     FileSystemCache = importlib.import_module("cachelib.file").FileSystemCache
 
     with contextlib.suppress(Exception):
-        _session_cache = FileSystemCache(str(sess_dir))
+        _session_cache = FileSystemCache(str(sess_dir), mode=0o600)
 except Exception:
     _session_cache = None
 
@@ -527,7 +529,11 @@ def _load_user_record() -> dict[str, Any] | None:
     load_user_fn = getattr(auth_mod, "load_user", None)
     if not callable(load_user_fn):
         return None
-    return _as_dict(load_user_fn())
+    record = _as_dict(load_user_fn())
+    # IP controls and access-log settings share the file before an account exists.
+    if record is None or not record.get("password_hash"):
+        return None
+    return record
 
 
 def _session_get(key: str, default: object = None) -> Any:
@@ -602,20 +608,6 @@ def _get_ip_whitelist() -> list[str]:
     return []
 
 
-def _set_ip_whitelist(ips: list[str]) -> None:
-    """Set the list of whitelisted IPs."""
-    with contextlib.suppress(Exception):
-        path = cfg_dir / "webui_auth.json"
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = _json_load_dict(path.read_text(encoding="utf-8"))
-            except Exception:
-                return
-        data["ip_whitelist"] = ips
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _get_ip_blacklist() -> list[str]:
     """Get the list of blacklisted IPs."""
     with contextlib.suppress(Exception):
@@ -629,18 +621,33 @@ def _get_ip_blacklist() -> list[str]:
     return []
 
 
-def _set_ip_blacklist(ips: list[str]) -> None:
-    """Set the list of blacklisted IPs."""
-    with contextlib.suppress(Exception):
+def _set_ip_control(whitelist: list[str], blacklist: list[str]) -> bool:
+    """Save both IP lists in one write so a failure cannot apply only one of them."""
+    try:
         path = cfg_dir / "webui_auth.json"
         data: dict[str, Any] = {}
         if path.exists():
-            try:
-                data = _json_load_dict(path.read_text(encoding="utf-8"))
-            except Exception:
-                return
+            data = _json_load_dict(path.read_text(encoding="utf-8"))
+        data["ip_whitelist"] = whitelist
+        data["ip_blacklist"] = blacklist
+        auth_mod.write_private_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        return False
+    return True
+
+
+def _set_ip_blacklist(ips: list[str]) -> bool:
+    """Set the list of blacklisted IPs, returning whether it was saved."""
+    try:
+        path = cfg_dir / "webui_auth.json"
+        data: dict[str, Any] = {}
+        if path.exists():
+            data = _json_load_dict(path.read_text(encoding="utf-8"))
         data["ip_blacklist"] = ips
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        auth_mod.write_private_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception:
+        return False
+    return True
 
 
 def _get_ip_failures() -> dict[str, list[int]]:
@@ -685,7 +692,7 @@ def _set_ip_failures(failures: dict[str, list[int]]) -> None:
             except Exception:
                 return
         data["ip_failures"] = failures
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        auth_mod.write_private_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _is_ip_allowed(ip: str) -> bool:
@@ -729,10 +736,84 @@ def _handle_failed_auth(ip: str) -> None:
             _set_ip_blacklist(blacklist)
 
 
+def _account_fingerprint() -> str | None:
+    """Identify the current account credentials without exposing the password hash.
+
+    Sessions and remember-me cookies carry this value, so recreating the account
+    (the documented password reset) or changing its password signs out every
+    existing browser.
+    """
+    record = _load_user_record()
+    password_hash = record.get("password_hash") if record else None
+    key = _derive_aes_key()
+    if not isinstance(password_hash, str) or not password_hash or not key:
+        return None
+    return hmac.new(key, b"webui-account:" + password_hash.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _account_fingerprint_matches(value: object) -> bool:
+    fingerprint = _account_fingerprint()
+    return fingerprint is not None and isinstance(value, str) and hmac.compare_digest(value, fingerprint)
+
+
 def _is_authenticated() -> bool:
     if getattr(g, "authenticated", False):
         return True
-    return bool(_session_get("authenticated", False))
+    session_data = _load_session_dict()
+    return bool(session_data.get("authenticated")) and _account_fingerprint_matches(session_data.get("account"))
+
+
+def _mark_session_authenticated(username: str) -> None:
+    """Replace the browser session with a fresh authenticated one."""
+    _commit_session_dict(
+        {
+            "authenticated": True,
+            "username": username,
+            "account": _account_fingerprint(),
+            "csrf_token": secrets.token_urlsafe(32),
+        }
+    )
+    # Issue a new session id so an id known before sign-in cannot be reused.
+    with contextlib.suppress(Exception):
+        app.session_interface.regenerate(session)
+
+
+_first_run_setup_code_value: str | None = None
+_first_run_setup_code_lock = threading.Lock()
+
+
+def _normalize_setup_code(code: str) -> str:
+    return re.sub(r"[\s-]+", "", code).upper()
+
+
+def _first_run_setup_code() -> str:
+    """Return the one-time code that authorizes creating the first account.
+
+    The code is printed to the server console when it is created, so only
+    someone who can see the Upload Assistant output can create the account.
+    """
+    global _first_run_setup_code_value
+    with _first_run_setup_code_lock:
+        if _first_run_setup_code_value is None:
+            alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+            raw = "".join(secrets.choice(alphabet) for _ in range(12))
+            _first_run_setup_code_value = "-".join(raw[i : i + 4] for i in range(0, len(raw), 4))
+            console.print(
+                f"WebUI first-run setup code: {_first_run_setup_code_value} (enter it on the sign-in page to create the WebUI account)",
+                markup=False,
+            )
+        return _first_run_setup_code_value
+
+
+def _first_run_setup_code_matches(code: str) -> bool:
+    expected = _normalize_setup_code(_first_run_setup_code())
+    return bool(code) and hmac.compare_digest(_normalize_setup_code(code), expected)
+
+
+def _clear_first_run_setup_code() -> None:
+    global _first_run_setup_code_value
+    with _first_run_setup_code_lock:
+        _first_run_setup_code_value = None
 
 
 def _cleanup_duplicate_sessions(username: str) -> None:
@@ -833,13 +914,14 @@ def _validate_execution_path(path: str, *, inspected_directories: InspectedDirec
         inspected_directories = set()
     resolved = os.path.realpath(path)
     if _is_generated_queue(resolved):
-        # Revalidate every content item, including folder descendants, at execution.
+        # The hash proves these are the lines save_queue fully validated. The
+        # upload subprocess validates every item and folder descendant again
+        # before processing the first one, so do not walk them a third time.
         for number, line in enumerate(Path(resolved).read_text(encoding="utf-8").splitlines(), 1):
             try:
-                values = shlex.split(line)
-                validate_content_path(values[0], _get_browse_roots(), inspected_directories=inspected_directories)
-                _validate_upload_assistant_args(values[1:], inspected_directories=inspected_directories)
-            except (ValueError, IndexError) as error:
+                if not shlex.split(line):
+                    raise ValueError("Empty queue line")
+            except ValueError as error:
                 raise ValueError(f"Invalid queue line {number}: {error}") from error
         return resolved
     resolved = _resolve_user_path(path, require_exists=True, require_dir=False)
@@ -855,6 +937,37 @@ def _remove_generated_queue_file(key: str) -> None:
         and os.path.normcase(os.path.realpath(path.parent)) == os.path.normcase(os.path.realpath(STATE_DIR / "tmp"))
     ):
         path.unlink(missing_ok=True)
+
+
+# Logs of interrupted WebUI queues are kept so resending the selection resumes it.
+WEBUI_QUEUE_LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_WEBUI_QUEUE_LOG_RE = re.compile(r"webui_(?:[0-9a-f]{16}|queue_\d+_[0-9a-f]{8})_(?:processed_files|queue)\.log")
+
+
+def _remove_generated_queue_logs(queue_hash: str, lines: Sequence[str]) -> None:
+    """Drop a finished queue's logs; keep the processed list while items remain."""
+    tmp_dir = STATE_DIR / "tmp"
+    name = generated_queue_name(queue_hash)
+    (tmp_dir / f"{name}_queue.log").unlink(missing_ok=True)
+    processed_log = tmp_dir / f"{name}_processed_files.log"
+    try:
+        processed = json.loads(processed_log.read_text(encoding="utf-8"))
+    except OSError, ValueError:
+        return
+    items = {line.strip() for line in lines if line.strip()}
+    if items and isinstance(processed, list) and items <= set(processed):
+        processed_log.unlink(missing_ok=True)
+
+
+def _prune_stale_queue_logs() -> None:
+    """Remove WebUI queue logs nobody resumed within the retention period."""
+    cutoff = time.time() - WEBUI_QUEUE_LOG_RETENTION_SECONDS
+    for path in (STATE_DIR / "tmp").glob("webui_*.log"):
+        try:
+            if _WEBUI_QUEUE_LOG_RE.fullmatch(path.name) and path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError as error:
+            console.print(f"Could not remove stale WebUI queue log: {error}", markup=False)
 
 
 # Runtime flags and stored totp
@@ -953,7 +1066,7 @@ except Exception:
 # Persistent cookie key helpers -------------------------------------------------
 def _get_persistent_cookie_key() -> bytes | None:
     """Return a bytes key used to HMAC-sign remember-me cookies.
-    Attempt to read from keyring; if missing and not in Docker, generate and store one.
+    Read the persisted key from the config dir; if missing, generate and store one.
     """
     with contextlib.suppress(Exception):
         raw = _cfg_read("session_key")
@@ -1055,7 +1168,8 @@ def _persist_existing_api_token(token: str, username: str, label: str = "") -> b
 
 
 def _verify_api_token(token: str) -> str | None:
-    if not token:
+    # Short legacy tokens are guessable; generated tokens are far longer.
+    if not token or len(token) < 32:
         return None
     store = _load_token_store()
     info = store.get(_hash_api_token(token))
@@ -1151,7 +1265,7 @@ def _create_remember_token(username: str, days: int = 30) -> str | None:
     if not key:
         return None
     expiry = int(datetime.now(UTC).timestamp()) + days * 86400
-    payload = json.dumps({"u": username, "e": expiry}, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps({"u": username, "e": expiry, "a": _account_fingerprint()}, separators=(",", ":")).encode("utf-8")
     b64 = base64.urlsafe_b64encode(payload).decode("ascii")
     sig = hmac.new(key, b64.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{b64}|{sig}"
@@ -1185,6 +1299,8 @@ def _verify_remember_token(token: str) -> str | None:
         else:
             return None
         if not username or expiry < int(datetime.now(UTC).timestamp()):
+            return None
+        if not _account_fingerprint_matches(data.get("a")):
             return None
         return str(username)
     except Exception:
@@ -1244,12 +1360,19 @@ def _parse_cors_origins() -> list[str]:
     origins: list[str] = []
     for part in raw.split(","):
         part = part.strip()
+        if part == "*":
+            # Credentialed CORS for every origin would let any website read the
+            # CSRF token and act as the signed-in user.
+            raise ValueError("UA_WEBUI_CORS_ORIGINS must list explicit origins; '*' is not allowed")
         if part:
             origins.append(part)
     return origins
 
 
 cors_origins = _parse_cors_origins()
+if not cors_origins:
+    # Cross-site callers are not configured, so keep browser sessions same-site.
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 if cors_origins:
     # Allow the CSRF header and support credentials so browser-based
     # cross-origin requests can send cookies for authenticated sessions.
@@ -2853,6 +2976,9 @@ def _webui_auth_ok() -> bool:
         return False
     if not persisted:
         return False
+    # Basic auth carries no second factor, so it would bypass 2FA.
+    if _totp_enabled():
+        return False
     return auth_mod.verify_user(auth.username or "", auth.password or "")
 
 
@@ -2931,6 +3057,17 @@ def _require_auth_for_webui():  # pyright: ignore[reportUnusedFunction]
         return redirect(url_for("login_page"))
 
     return None
+
+
+@app.after_request
+def _set_security_headers(response: Any) -> Any:  # pyright: ignore[reportUnusedFunction]
+    """Apply browser hardening headers that do not affect embedding or proxies."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith("/api/"):
+        # API responses can contain configuration secrets and upload output.
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @app.after_request
@@ -3509,7 +3646,7 @@ def _validate_release_group_overrides(value: object) -> None:
                 try:
                     if isinstance(field_val, bool) or not isinstance(field_val, (str, int)) or int(field_val) < minimum:
                         raise ValueError
-                except (ValueError, TypeError):  # fmt: skip
+                except ValueError, TypeError:
                     raise ValueError(f"{field} for {name} must be an integer of at least {minimum}, or null.") from None
                 continue
             if not isinstance(field_val, str):
@@ -4078,6 +4215,7 @@ def index():
             app_version=APP_VERSION,
             csrf_token=_ensure_csrf_token(),
             cli_arguments=cli_argument_catalog(),
+            max_upload_paths=MAX_UPLOAD_PATHS,
             screenshot_mode=request.args.get("screenshot") == "1",
         )
     except Exception as e:
@@ -4106,11 +4244,7 @@ def login_page():
                     _handle_failed_auth(get_remote_address())
                     return render_template("login.html", error="Credentials did not match", show_2fa=_totp_enabled(), setup_mode=False)
 
-                _session_set("authenticated", True)
-                with contextlib.suppress(Exception):
-                    _session_set("username", username)
-                with contextlib.suppress(Exception):
-                    _session_set("csrf_token", secrets.token_urlsafe(32))
+                _mark_session_authenticated(username)
                 if remember:
                     session.permanent = True
                 resp = redirect(url_for("index"))
@@ -4125,23 +4259,22 @@ def login_page():
             # Credentials don't match persisted user
             _handle_failed_auth(get_remote_address())
             return render_template("login.html", error="Credentials did not match", setup_mode=False)
-        # No persisted user: allow UI-driven creation (first-run setup)
+        # No persisted user: allow UI-driven creation (first-run setup). The
+        # setup code is only shown in the server console, so a visitor who
+        # reaches an exposed WebUI first cannot claim the account.
         if username and password:
-            if _totp_enabled() and not (totp_code and _verify_totp_code(totp_code)):
+            if not _first_run_setup_code_matches(_request_form_text("setup_code")):
                 _handle_failed_auth(get_remote_address())
-                return render_template("login.html", error="Credentials did not match", show_2fa=_totp_enabled(), setup_mode=True)
+                return render_template("login.html", error="Setup code did not match. Copy it from the Upload Assistant console output.", setup_mode=True)
             try:
                 auth_mod.create_user(username, password)
             except ValueError as exc:
-                return render_template("login.html", error=str(exc), show_2fa=_totp_enabled(), setup_mode=True)
+                return render_template("login.html", error=str(exc), setup_mode=True)
             except Exception:
-                return render_template("login.html", error="Unable to create account", show_2fa=_totp_enabled(), setup_mode=True)
+                return render_template("login.html", error="Unable to create account", setup_mode=True)
+            _clear_first_run_setup_code()
 
-            _session_set("authenticated", True)
-            with contextlib.suppress(Exception):
-                _session_set("username", username)
-            with contextlib.suppress(Exception):
-                _session_set("csrf_token", secrets.token_urlsafe(32))
+            _mark_session_authenticated(username)
             if remember:
                 session.permanent = True
                 with contextlib.suppress(Exception):
@@ -4162,7 +4295,10 @@ def login_page():
 
     # Show 2FA field if enabled
     show_2fa = _totp_enabled()
-    return render_template("login.html", show_2fa=show_2fa, setup_mode=_load_user_record() is None)
+    setup_mode = _load_user_record() is None
+    if setup_mode:
+        _first_run_setup_code()
+    return render_template("login.html", show_2fa=show_2fa, setup_mode=setup_mode)
 
 
 @app.errorhandler(429)
@@ -4224,11 +4360,7 @@ def login_recovery():
     # If a persisted user exists, require those credentials + recovery code
     if persisted:
         if username and password and recovery_code and _consume_recovery_code(recovery_code) and auth_mod.verify_user(username, password):
-            _session_set("authenticated", True)
-            with contextlib.suppress(Exception):
-                _session_set("username", username)
-            with contextlib.suppress(Exception):
-                _session_set("csrf_token", secrets.token_urlsafe(32))
+            _mark_session_authenticated(username)
             if remember:
                 session.permanent = True
                 with contextlib.suppress(Exception):
@@ -4241,35 +4373,6 @@ def login_recovery():
         # Failed recovery attempt -> record and show recovery page
         _handle_failed_auth(get_remote_address())
         return render_template("login_recovery.html", error="Recovery code invalid", show_2fa=_totp_enabled())
-
-    # No persisted user: allow first-run creation with recovery-code flow
-    if username and password and recovery_code and _consume_recovery_code(recovery_code):
-        try:
-            auth_mod.create_user(username, password)
-        except ValueError as exc:
-            return render_template("login_recovery.html", error=str(exc), show_2fa=_totp_enabled())
-        except Exception:
-            return render_template("login_recovery.html", error="Unable to create account", show_2fa=_totp_enabled())
-
-        _session_set("authenticated", True)
-        with contextlib.suppress(Exception):
-            _session_set("username", username)
-        with contextlib.suppress(Exception):
-            _session_set("csrf_token", secrets.token_urlsafe(32))
-        if remember:
-            session.permanent = True
-            with contextlib.suppress(Exception):
-                token = _create_remember_token(username)
-                if token:
-                    resp = redirect(url_for("config_page"))
-                    resp.set_cookie("ua_remember", token, max_age=30 * 86400, httponly=True, secure=True, samesite="Lax")
-                    with suppress(Exception):
-                        _cleanup_duplicate_sessions(username)
-                    return resp
-
-        with suppress(Exception):
-            _cleanup_duplicate_sessions(username)
-        return redirect(url_for("config_page"))
 
     _handle_failed_auth(get_remote_address())
     return render_template("login_recovery.html", error="Recovery code invalid", show_2fa=_totp_enabled())
@@ -4424,6 +4527,7 @@ def stats_api():
 
 
 @app.route("/api/update_status")
+@limiter.limit("7200 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def update_status():
     """Return the cached upstream release status for the shared application rail."""
     if not _is_authenticated():
@@ -4528,6 +4632,7 @@ def external_tools_status():
 
 
 @app.route("/api/csrf_token")
+@limiter.limit("7200 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def csrf_token():
     """Return the per-session CSRF token for use by the frontend."""
     # Require authenticated web session for CSRF token access
@@ -4692,8 +4797,9 @@ def ip_control_api():
                 except ValueError:
                     return jsonify({"success": False, "error": f"Invalid IP address: {ip}"}), 400
 
-            _set_ip_whitelist(whitelist)
-            _set_ip_blacklist(blacklist)
+            # Report a policy that was not saved instead of claiming success.
+            if not _set_ip_control(whitelist, blacklist):
+                return jsonify({"success": False, "error": "Failed to update IP control settings"}), 500
             return jsonify({"success": True})
         except Exception as e:
             console.print(f"Error updating IP control: {e}", markup=False)
@@ -5360,6 +5466,7 @@ def refresh_tracker_status():
 
 
 @app.route("/api/trackers")
+@limiter.limit("7200 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def get_trackers():
     """Return supported trackers, including their default/configured status."""
     if not _is_authenticated():
@@ -5627,7 +5734,7 @@ def _config_write_route(view: Callable[..., Any]) -> Callable[..., Any]:
         try:
             with config_write_lock(STATE_DIR / "data" / "config.py"):
                 return view(*args, **kwargs)
-        except ConfigWriteConflict as error:
+        except ConfigWriteConflictError as error:
             return jsonify({"success": False, "error": str(error)}), 409
         except (ValueError, SyntaxError, UnicodeError) as error:
             return jsonify({"success": False, "error": f"Configuration file could not be parsed: {error}"}), 400
@@ -6253,6 +6360,9 @@ def api_tokens():
             token_value = str(data.get("token") or "")
             if not token_value:
                 return jsonify({"success": False, "error": "Token value required for store action"}), 400
+            # Stored tokens grant upload access, so refuse short guessable values.
+            if len(token_value) < 32:
+                return jsonify({"success": False, "error": "Token must be at least 32 characters"}), 400
             # Persist tokens to the config store
             ok = _persist_existing_api_token(token_value, username, label=str(label))
             if ok:
@@ -6582,6 +6692,7 @@ def execution_preview():
 
 
 @app.route("/api/argument_presets", methods=["GET", "POST", "DELETE"])
+@limiter.limit("7200 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def argument_presets():
     """Read and persist shared Web UI argument presets in ``data``."""
     if not _is_authenticated():
@@ -6626,6 +6737,7 @@ def argument_presets():
 
 
 @app.route("/api/execution_preview_cover")
+@limiter.limit("7200 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def execution_preview_cover():
     """Serve a local preview cover image for the active execution session."""
     session_id = str(request.args.get("session_id", "")).strip()
@@ -6641,6 +6753,7 @@ def execution_preview_cover():
 
 
 @app.route("/api/execution_preview_cover/regenerate", methods=["POST"])
+@limiter.limit("600 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def regenerate_execution_preview_cover():
     """Regenerate the local XXX preview cover from another video frame."""
     if not _verify_csrf_header() or not _verify_same_origin():
@@ -6776,6 +6889,7 @@ def execution_description():
 
 
 @app.route("/api/execution_description", methods=["PUT"])
+@limiter.limit("600 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def save_execution_description():
     """Persist an edited draft for the current execution with optimistic locking."""
     if not _verify_csrf_header() or not _verify_same_origin():
@@ -6815,6 +6929,7 @@ def save_execution_description():
 
 
 @app.route("/api/execution_description/reset", methods=["POST"])
+@limiter.limit("600 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def reset_execution_description():
     """Restore the draft from one of the read-only sources."""
     if not _verify_csrf_header() or not _verify_same_origin():
@@ -6871,6 +6986,7 @@ def execution_screenshot_image(screenshot_id: str):
 
 
 @app.route("/api/execution_screenshots/add", methods=["POST"])
+@limiter.limit("600 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def add_execution_screenshot():
     """Capture one extra local screenshot for the active execution."""
     if not _verify_csrf_header() or not _verify_same_origin():
@@ -6899,6 +7015,7 @@ def add_execution_screenshot():
 
 
 @app.route("/api/execution_screenshots/<screenshot_id>/<action>", methods=["POST"])
+@limiter.limit("600 per hour", key_func=_rate_limit_key_func, override_defaults=True)
 def mutate_execution_screenshot(screenshot_id: str, action: str):
     """Delete or replace a reviewed frame with CSRF and same-origin protection."""
     if action not in {"delete", "replace", "undo"}:
@@ -6933,8 +7050,14 @@ def mutate_execution_screenshot(screenshot_id: str, action: str):
     return jsonify({"success": True})
 
 
+def _save_queue_created_file(response: _ResponseLike) -> bool:
+    """Only issued queue files count against the quota, not path validation."""
+    data = response.get_json(silent=True)
+    return isinstance(data, dict) and data.get("queued") is True
+
+
 @app.route("/api/save_queue", methods=["POST"])
-@limiter.limit("100 per hour", key_func=_rate_limit_key_func)
+@limiter.limit("100 per hour", key_func=_rate_limit_key_func, deduct_when=_save_queue_created_file)
 def save_queue():
     """Save selected items to a temporary queue text file on the server"""
     # CSRF check
@@ -6970,6 +7093,9 @@ def save_queue():
 
         validated_items: list[tuple[str, list[str]]] = []
         inspected_directories: InspectedDirectories = set()
+        # Item number by normalized content path, and by each of its parent folders.
+        claimed_paths: dict[str, int] = {}
+        claimed_parents: dict[str, int] = {}
         for number, item in enumerate(items, 1):
             if not isinstance(item, dict):
                 return jsonify({"error": f"Invalid queue item {number}", "success": False, "item": number}), 400
@@ -6985,6 +7111,15 @@ def save_queue():
                 validated_args = _validate_upload_assistant_args(shlex.split(args) if args else [], inspected_directories=inspected_directories)
             except (ValueError, TypeError) as err:
                 return jsonify({"error": f"Invalid queue item {number}: {err}", "success": False, "item": number}), 400
+            content_key = os.path.normcase(validated_path)
+            parent_keys = [str(parent) for parent in Path(content_key).parents]
+            # The same content twice, or a folder plus something inside it, would upload twice.
+            overlapping = next((claimed_paths[key] for key in (content_key, *parent_keys) if key in claimed_paths), claimed_parents.get(content_key))
+            if overlapping is not None:
+                return jsonify({"error": f"Invalid queue item {number}: repeats or overlaps item {overlapping}", "success": False, "item": number}), 400
+            claimed_paths[content_key] = number
+            for parent_key in parent_keys:
+                claimed_parents.setdefault(parent_key, number)
             validated_items.append((validated_path, validated_args))
 
         if not validated_items:
@@ -7016,6 +7151,7 @@ def save_queue():
                 _remove_generated_queue_file(evicted_key)
             except OSError as error:
                 console.print(f"Could not remove expired WebUI queue: {error}", markup=False)
+        _prune_stale_queue_logs()
 
         return jsonify({"success": True, "path": str(file_path), "queued": True})
 
@@ -7352,7 +7488,9 @@ def _remove_session_queue_file(validated_path: str) -> None:
         with _generated_queues_lock:
             generated = _generated_queues.pop(key, None)
         if generated is not None:
+            lines = Path(key).read_text(encoding="utf-8").splitlines() if Path(key).is_file() else []
             _remove_generated_queue_file(key)
+            _remove_generated_queue_logs(generated, lines)
             console.print(f"Cleaned up queue file: {Path(validated_path).name}", markup=False)
     except Exception as cleanup_err:
         console.print(f"Failed to cleanup queue file: {cleanup_err}", markup=False)
@@ -8002,6 +8140,38 @@ def internal_error(e: Exception):
     console.print(f"500 error: {e!s}", markup=False)
     console.print(traceback.format_exc(), markup=False)
     return jsonify({"error": "Internal server error", "success": False}), 500
+
+
+def _readable_secret_files() -> list[Path]:
+    """List credential files that other local accounts can read (POSIX only)."""
+    if os.name != "posix":
+        return []
+    data_dir = STATE_DIR / "data"
+    candidates = [data_dir / "config.py", cfg_dir / "webui_auth.json", cfg_dir / "session_secret", cfg_dir / "session_key"]
+    with contextlib.suppress(OSError):
+        candidates.extend(path for path in (data_dir / "cookies").iterdir() if path.is_file())
+    readable: list[Path] = []
+    for path in candidates:
+        with contextlib.suppress(OSError):
+            if path.stat().st_mode & (stat.S_IRGRP | stat.S_IROTH):
+                readable.append(path)
+    return readable
+
+
+# Startup notices: shared seedboxes expose group/world-readable credentials to
+# other accounts, and a first-run WebUI needs the console-only setup code.
+with contextlib.suppress(Exception):
+    _exposed_secret_files = _readable_secret_files()
+    if _exposed_secret_files:
+        console.print(
+            "Warning: these credential files are readable by other users on this system: "
+            + ", ".join(str(path) for path in _exposed_secret_files)
+            + ". Restrict them with 'chmod 600 <file>' (or 'chmod 700' on their directory).",
+            markup=False,
+        )
+with contextlib.suppress(Exception):
+    if _load_user_record() is None:
+        _first_run_setup_code()
 
 
 # Keep these helpers referenced so static analysis does not flag them as unused.

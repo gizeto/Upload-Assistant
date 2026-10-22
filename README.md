@@ -156,7 +156,7 @@ You can specify multiple browse roots by separating them with commas. In this ex
 ua "/path/to/media" --webui
 ```
 
-Open **<http://127.0.0.1:5000>** in a browser on the same computer. On your first visit, create a username and password for the WebUI's local account. This account is separate from your tracker accounts.
+Open **<http://127.0.0.1:5000>** in a browser on the same computer. On your first visit, enter the setup code printed in the terminal, then create a username and password for the WebUI's local account. This account is separate from your tracker accounts.
 
 **Check:** You should see the Upload workspace and be able to browse the folder you supplied.
 
@@ -398,6 +398,7 @@ uv tool install --force git+https://github.com/wastaken7/Upload-Assistant.git
 | <img src="web_ui/static/img/trackers/xingyungept.png" width="16" height="16" />               | XingyungePT            | XINGYUNGEPT            | MOVIE, TV                    |
 | <img src="web_ui/static/img/trackers/ulcx.png" width="16" height="16" />                      | ULCX                   | ULCX                   | MOVIE, TV                    |
 | <img src="web_ui/static/img/trackers/utopia.png" width="16" height="16" />                    | UTOPIA                 | UTOPIA                 | MOVIE, TV                    |
+| <img src="web_ui/static/img/trackers/vultu.png" width="16" height="16" />                     | vultu                  | VULTU                  | MOVIE, TV, GAME              |
 | <img src="web_ui/static/img/trackers/yuscene.png" width="16" height="16" />                   | YUSCENE                | YUSCENE                | MOVIE, TV, BOOK, GAME, MUSIC |
 | <img src="web_ui/static/img/trackers/zenith.png" width="16" height="16" />                    | Zenith                 | ZENITH                 | MOVIE, TV, BOOK, GAME, MUSIC |
 
