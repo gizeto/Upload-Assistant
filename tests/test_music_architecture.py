@@ -59,7 +59,37 @@ def test_description_builder_renders_music_release_details():
     assert "24-bit" in result
     assert "96 kHz" in result
     assert "Stereo" in result
-    assert "3000 kbps, 3100 kbps" in result
+    assert "[td]3050 kbps[/td]" in result
+
+
+def test_description_builder_weights_music_bitrate_by_track_duration():
+    meta = Meta(
+        category="MUSIC",
+        music_release={
+            "fields": {"album": {"value": "Invented Album"}},
+            "tracks": [{"bitrate": 1000000, "duration": 300}, {"bitrate": 2000000, "duration": 100}],
+        },
+    )
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(meta)
+
+    assert "[td]1250 kbps[/td]" in result
+
+
+def test_description_builder_keeps_bitrate_when_duration_is_invalid():
+    meta = Meta(
+        category="MUSIC",
+        music_release={
+            "fields": {"album": {"value": "Invented Album"}},
+            "tracks": [{"bitrate": 1000000, "duration": "unknown"}, {"bitrate": 2000000, "duration": 100}],
+        },
+    )
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(meta)
+
+    assert "[td]1500 kbps[/td]" in result
 
 
 def test_description_builder_renders_album_tracklist_in_disc_order():
@@ -117,6 +147,73 @@ def test_description_builder_tracklist_uses_plain_text_when_tracker_disables_tab
     assert "[h2]Tracklist[/h2]\n01. Opening (02:01)" in result
 
 
+def test_description_builder_renders_rip_logs_in_spoilers(tmp_path: Path):
+    (tmp_path / "CD1").mkdir()
+    (tmp_path / "CD1" / "Invented Album.log").write_bytes("Exact Audio Copy V1.6\r\n\r\nUsed drive  : Fictional Drive\r\nHidden [/code] tag\r\n".encode("utf-16"))
+    (tmp_path / "XLD.log").write_text("X Lossless Decoder version 20240511\nHidden [/pre] tag\nAll tracks accurately ripped\n", encoding="utf-8")
+    (tmp_path / "notes.log").write_text("Mounted the CD-ROM image\n", encoding="utf-8")
+    release = {
+        "root": str(tmp_path),
+        "tracks": [{"relative_path": "01 - Opening.flac", "track_number": 1, "title": "Opening"}],
+        "auxiliary": {"logs": ["CD1/Invented Album.log", "XLD.log", "notes.log", "missing.log", "../outside.log"]},
+    }
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}}, language="pt-BR")
+
+    result = builder._build_music_desc_section(Meta(category="MUSIC", music_release=release))
+
+    assert result.index("[h2]Lista de faixas[/h2]") < result.index("[h2]Logs de Ripagem[/h2]")
+    assert "[spoiler=CD1/Invented Album.log][code]Exact Audio Copy V1.6\n\nUsed drive  : Fictional Drive\nHidden ［/code] tag[/code][/spoiler]" in result
+    assert "[spoiler=XLD.log][code]X Lossless Decoder version 20240511\nHidden ［/pre] tag\nAll tracks accurately ripped[/code][/spoiler]" in result
+    assert "notes.log" not in result
+    assert "\r" not in result
+
+
+def test_description_builder_omits_rip_log_section_without_rip_logs(tmp_path: Path):
+    (tmp_path / "notes.log").write_text("not a rip log\n", encoding="utf-8")
+    release = {"root": str(tmp_path), "tracks": [{"title": "Opening"}], "auxiliary": {"logs": ["notes.log"]}}
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(Meta(category="MUSIC", music_release=release))
+
+    assert "Rip Logs" not in result
+    assert "[spoiler" not in result
+
+
+def _music_meta_with_cover() -> Meta:
+    return Meta(
+        category="MUSIC",
+        music_release={"fields": {"album": {"value": "Invented Album"}}},
+        hosted_artwork=[{"raw_url": "https://img.example/cover.jpg", "web_url": "https://img.example/view"}],
+    )
+
+
+def test_description_builder_adds_cover_column_for_asiancinema():
+    builder = DescriptionBuilder("ASIANCINEMA", {"DEFAULT": {}, "TRACKERS": {"ASIANCINEMA": {}}})
+
+    result = builder._build_music_desc_section(_music_meta_with_cover())
+
+    assert "[table]\n[tr][td][img=250]https://img.example/cover.jpg[/img][/td][td]\n[table]\n[tr][td][b]Album[/b][/td][td]Invented Album[/td][/tr]" in result
+
+
+def test_description_builder_adds_html_cover_column_for_torrentleech():
+    builder = DescriptionBuilder("TORRENTLEECH", {"DEFAULT": {}, "TRACKERS": {"TORRENTLEECH": {}}})
+
+    result = builder._build_music_desc_section(_music_meta_with_cover())
+
+    assert '<table><tr><td style="vertical-align: top; padding-right: 15px;"><img src="https://img.example/cover.jpg"' in result
+    assert '<td style="vertical-align: top;">[b]Album:[/b] Invented Album</td>' in result
+    assert result.endswith("</td></tr></table>")
+
+
+def test_description_builder_omits_cover_column_for_other_trackers():
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(_music_meta_with_cover())
+
+    assert "cover.jpg" not in result
+    assert "[h2]Music Details[/h2]\n[table]\n[tr][td][b]Album[/b]" in result
+
+
 def test_description_builder_renders_external_music_ids_as_links():
     musicbrainz_release = "c0d17e85-3a36-4dc8-9a88-c188a5e78b0d"
     musicbrainz_group = "3bdb2b21-f6f5-3f8b-a1e0-067f8bb71940"
@@ -138,9 +235,64 @@ def test_description_builder_renders_external_music_ids_as_links():
 
     assert "External IDs" in result
     assert f"[url=https://musicbrainz.org/release/{musicbrainz_release}]{musicbrainz_release}[/url]" in result
-    assert f"[url=https://musicbrainz.org/release-group/{musicbrainz_group}]{musicbrainz_group}[/url]" in result
     assert "[url=https://www.discogs.com/release/1791341]1791341[/url]" in result
+    # Group/master IDs are redundant once the exact release is known.
+    assert musicbrainz_group not in result
+    assert "28700" not in result
+
+
+def test_description_builder_falls_back_to_group_and_master_ids():
+    musicbrainz_group = "3bdb2b21-f6f5-3f8b-a1e0-067f8bb71940"
+    meta = Meta(category="MUSIC", music_release={"external_ids": {"musicbrainz_release_group": musicbrainz_group, "discogs_master": "master/28700"}})
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(meta)
+
+    assert f"[url=https://musicbrainz.org/release-group/{musicbrainz_group}]{musicbrainz_group}[/url]" in result
     assert "[url=https://www.discogs.com/master/28700]28700[/url]" in result
+
+
+def test_description_builder_compacts_redundant_music_fields():
+    meta = Meta(
+        category="MUSIC",
+        music_release={
+            "fields": {
+                "album": {"value": "Invented Album"},
+                "year": {"value": "2001"},
+                "release_year": {"value": "2001"},
+                "edition_year": {"value": "2001"},
+                "disc_count": {"value": 1},
+                "format": {"value": "FLAC"},
+            },
+            "tracks": [{"relative_path": "01 - Opening.flac", "track_number": 1, "title": "Opening", "codec": "FLAC", "bit_depth": 24, "sample_rate": 96000, "channels": 2}],
+        },
+    )
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(meta)
+
+    assert "[tr][td][b]Audio[/b][/td][td]FLAC / 24-bit / 96 kHz / Stereo[/td][/tr]" in result
+    for hidden in ("[b]Release Year[/b]", "Edition Year", "Discs", "Codec", "[b]Tracks[/b]", "Bit Depth", "Sample Rate", "Channels"):
+        assert hidden not in result
+    assert "[h2]Tracklist[/h2]" in result
+
+
+def test_description_builder_keeps_distinct_music_fields():
+    meta = Meta(
+        category="MUSIC",
+        music_release={
+            "fields": {"year": {"value": "1999"}, "release_year": {"value": "2024"}, "edition_year": {"value": "2020"}, "disc_count": {"value": 2}, "format": {"value": "MP3"}},
+            "tracks": [{"codec": "LAME"}],
+        },
+    )
+    builder = DescriptionBuilder("PEERGARDEN", {"DEFAULT": {}, "TRACKERS": {"PEERGARDEN": {}}})
+
+    result = builder._build_music_desc_section(meta)
+
+    assert "[b]Release Year[/b][/td][td]2024" in result
+    assert "[b]Edition Year[/b][/td][td]2020" in result
+    assert "[b]Discs[/b][/td][td]2" in result
+    assert "[td]MP3 (LAME)[/td]" in result
 
 
 def test_description_generator_includes_music_release_details():
@@ -1086,3 +1238,11 @@ def test_gather_music_prep_generates_mediainfo(tmp_path):
         meta.base_dir,
         is_dvd=False,
     )
+
+
+def test_torrentleech_renders_headings_as_bold():
+    builder = DescriptionBuilder("TORRENTLEECH", {"DEFAULT": {}, "TRACKERS": {"TORRENTLEECH": {}}})
+
+    result = builder.tracker_specific_formats("TORRENTLEECH", "[h2]Music Details[/h2]\n[H1]Title[/H1]\n[h3]Notes[/h3]")
+
+    assert result == "[b]Music Details[/b]\n[b]Title[/b]\n[b]Notes[/b]"

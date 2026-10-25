@@ -471,8 +471,6 @@ config: dict[str, Any] = {
         "process_all_audio_spectrogram": False,
         # Seconds from the beginning of each selected stream to analyse.
         "audio_spectrogram_duration": 600,
-        # Decode at this sample rate (48 kHz retains frequencies up to 24 kHz).
-        "audio_spectrogram_sample_rate": 48000,
         # For music and audiobooks, limit the number of tracks or chapters processed.
         "audio_spectrogram_max_files": 12,
         # Dynamic HDR plots
@@ -565,7 +563,7 @@ config: dict[str, Any] = {
         #   LUMINARR, MAKINGOFF, MIDNIGHTSCENE, MTEAM, NEBULANCE, NORDICQUALITY, NZBGEEK, NZBNEST, OLDTOONSWORLD, ONLYENCODES, ORPHEUS, PASSTHEPOPCORN,
         #   PEERGARDEN, POLISHTORRENT, PORTUGAS, PRIVATEHD, PTCAFE, PTERCLUB, PTFANS, PTGTK, PTSKIT, PTZONE, QINGWA, RACING4EVERYONE, RAILGUNPT,
         #   RASTASTUGAN, REELFLIX, RETROFLIX, RETROMOVIESCLUB, ROCKETHD, SAMARITANO, SEEDPOOL, SHAREISLAND, SKIPTHECOMMERCIALS, SPEEDAPP,
-        #   SUIO, SWARMAZON, THELEACHZONE, THEOLDSCHOOL, TORRENTEROS, TORRENTHR, TORRENTLEECH, TOTHEGLORY, TVCHAOSUK, ULCX, UTOPIA,
+        #   SUIO, SWARMAZON, THELEACHZONE, THEOLDSCHOOL, TORRENTEROS, TORRENTHAVEN, TORRENTHR, TORRENTLEECH, TOTHEGLORY, TVCHAOSUK, ULCX, UTOPIA,
         #   VULTU, XINGYUNGEPT, YUSCENE, ZENITH
         # This list is validated against the tracker blocks below by the test suite.
         # Only add the trackers you want to upload to on a regular basis
@@ -3262,6 +3260,18 @@ config: dict[str, Any] = {
             "bluray_image_size": "",
             "add_audio_spectrogram": True,
             "inject_delay": 0,
+        },
+        "TORRENTHAVEN": {
+            "cli_alias": "THN",
+            # Instead of using the tracker acronym for folder name when sym/hard linking, you can use a custom name
+            "link_dir_name": "",
+            # "use_for_search": False, set to True if using this tracker for automatic ID searching or description parsing
+            "use_for_search": False,
+            "api_key": "",
+            "announce_url": "",
+            "anon": False,
+            # Send uploads to the moderation queue for staff review and approval
+            "modq": False,
         },
         "TORRENTHR": {
             "cli_alias": "THR",

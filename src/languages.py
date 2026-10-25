@@ -1,4 +1,5 @@
 # Upload Assistant © 2025 Audionut & wastaken7 — Licensed under UAPL v1.0
+import contextlib
 import re
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ import cli_ui
 import langcodes
 from langcodes.tag_parser import LanguageTagError
 
+from src import webui_events
 from src.cleanup import cleanup_manager
 from src.console import logger
 from src.meta import Meta
@@ -47,6 +49,17 @@ class LanguagesManager:
                 seen.add(value)
                 deduped.append(value)
         return deduped
+
+    @staticmethod
+    def _track_language_prompt(title: str, tracks: list[str], kind: str) -> contextlib.AbstractContextManager[None]:
+        """Show the language question in the Web UI with the tracks that have none."""
+        return webui_events.field_prompt(
+            title,
+            dict.fromkeys(tracks, "No language tag"),
+            hint=f"Comma-separated languages for all {kind} tracks. Leaving it blank skips this upload.",
+            actions=[("", "Skip this upload")],
+            placeholder="e.g. English, Spanish",
+        )
 
     async def parse_blu_ray(self, meta: Meta) -> dict[str, Any]:
         try:
@@ -154,7 +167,9 @@ class LanguagesManager:
 
         lines = mediainfo_content.strip().split("\n")
 
-        section_header_re = re.compile(r"^(General|Video|Audio|Text|Menu)(?:\s*#\d+)?$", re.IGNORECASE)
+        # Include every MediaInfo stream kind so attachments (Image) and Other
+        # sections are not merged into the preceding audio or text track.
+        section_header_re = re.compile(r"^(General|Video|Audio|Text|Other|Image|Menu)(?:\s*#\d+)?$", re.IGNORECASE)
 
         for line in lines:
             line = line.strip()
@@ -289,7 +304,8 @@ class LanguagesManager:
                                     logger.info(f"  - {track_info}")
                                 logger.info("You must enter (comma-separated) languages")
                                 try:
-                                    audio_lang = cli_ui.ask_string("for all audio tracks, eg: English, Spanish:")
+                                    with self._track_language_prompt("Audio tracks without a language", tracks_without_language, "audio"):
+                                        audio_lang = cli_ui.ask_string("for all audio tracks, eg: English, Spanish:")
                                 except EOFError:
                                     logger.info("\n[red]Exiting on user request (Ctrl+C)[/red]")
                                     await cleanup_manager.cleanup()
@@ -335,7 +351,8 @@ class LanguagesManager:
                                         logger.info(f"  - {track_info}")
                                     logger.info("You must enter (comma-separated) languages")
                                     try:
-                                        subtitle_lang = cli_ui.ask_string("for all subtitle tracks, eg: English, Spanish:")
+                                        with self._track_language_prompt("Subtitle tracks without a language", tracks_without_language, "subtitle"):
+                                            subtitle_lang = cli_ui.ask_string("for all subtitle tracks, eg: English, Spanish:")
                                     except EOFError:
                                         logger.info("\n[red]Exiting on user request (Ctrl+C)[/red]")
                                         await cleanup_manager.cleanup()
@@ -366,7 +383,14 @@ class LanguagesManager:
                                 meta.write_hc_languages = True
                             elif not meta.unattended or (meta.unattended and meta.unattended_confirm):
                                 try:
-                                    hc_lang = cli_ui.ask_string("What language/s are the hardcoded subtitles?")
+                                    with webui_events.field_prompt(
+                                        "Hardcoded subtitles",
+                                        {"Release": meta.name or meta.title},
+                                        hint="The language of the subtitles burned into the video. Leaving it blank skips this upload.",
+                                        actions=[("", "Skip this upload")],
+                                        placeholder="e.g. English",
+                                    ):
+                                        hc_lang = cli_ui.ask_string("What language/s are the hardcoded subtitles?")
                                 except EOFError:
                                     logger.info("\n[red]Exiting on user request (Ctrl+C)[/red]")
                                     await cleanup_manager.cleanup()
