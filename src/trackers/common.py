@@ -10,6 +10,7 @@ import sys
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import aiofiles
@@ -22,6 +23,7 @@ from langcodes import tag_parser
 from torf import Torrent
 from unidecode import unidecode
 
+from src import webui_events
 from src.api_key_expiry import observe_tracker_response
 from src.bbcode import BBCODE
 from src.console import console, logger, prompt_in_thread
@@ -30,6 +32,7 @@ from src.distributors import distributor_name
 from src.exportmi import export_info
 from src.genre_map import AUDIBLE_ENG_GENRE_MAP, AUDIBLE_PTBR_GENRE_MAP, ENG_TO_PTBR_GENRE_MAP
 from src.languages import languages_manager
+from src.manual_input import Question, ask, confirm_override
 from src.meta import Meta
 from src.torrent_manifest import TorrentManifest
 from src.unit3d_catalogs import region_id as resolve_region_id
@@ -357,6 +360,7 @@ class Common:
     ) -> str | None:
         path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{tracker}_cross].torrent" if cross else f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{tracker}].torrent"
         if downurl:
+            temporary_path: Path | None = None
             try:
                 cookie_jar = None
                 from src.trackersetup import http_trackers
@@ -373,9 +377,14 @@ class Common:
                     session.stream("GET", downurl) as r,
                 ):
                     r.raise_for_status()
-                    async with aiofiles.open(path, "wb") as f:
+                    with NamedTemporaryFile(dir=Path(path).parent, prefix=f".{Path(path).name}.", suffix=".tmp", delete=False) as temporary_file:
+                        temporary_path = Path(temporary_file.name)
+                    async with aiofiles.open(temporary_path, "wb") as f:
                         async for chunk in r.aiter_bytes():
                             await f.write(chunk)
+
+                await asyncio.to_thread(Torrent.read, temporary_path)
+                temporary_path.replace(path)
 
                 if cross:
                     return None
@@ -388,6 +397,10 @@ class Common:
                 logger.warning(f"[yellow]Warning: Could not download torrent file: {e!s}[/yellow]")
                 logger.info("[yellow]Download manually from the tracker.[/yellow]")
                 return None
+            finally:
+                if temporary_path is not None:
+                    with contextlib.suppress(OSError):
+                        temporary_path.unlink(missing_ok=True)
 
         return None
 
@@ -577,7 +590,18 @@ class Common:
 
         if not meta.unattended:
             try:
-                selection = (await prompt_in_thread(cli_ui.ask_string, f"Do you want to use these IDs from {tracker_name}? (Y/n): ", default="") or "").strip().lower()
+                with webui_events.field_prompt(
+                    f"{tracker_name} metadata",
+                    {
+                        "Filename": filename,
+                        "TMDb ID": tmdb,
+                        "IMDb ID": f"tt{imdb}" if imdb else "",
+                        "TVDb ID": tvdb,
+                        "MAL ID": mal,
+                    },
+                    actions=[("y", "Yes"), ("n", "No")],
+                ):
+                    selection = (await prompt_in_thread(cli_ui.ask_string, f"Do you want to use these IDs from {tracker_name}? (Y/n): ", default="") or "").strip().lower()
                 return selection == "" or selection == "y" or selection == "yes"
             except KeyboardInterrupt, EOFError:
                 sys.exit(1)
@@ -585,10 +609,26 @@ class Common:
             return True
 
     async def prompt_user_for_confirmation(self, message: str, meta: Meta | None = None) -> bool:
-        if meta and meta.unattended and not meta.unattended_confirm:
-            return False
-        response = (await prompt_in_thread(cli_ui.ask_string, f"{message} (Y/n): ", default="") or "").strip().lower()
-        return response == "" or response == "y"
+        with webui_events.field_prompt("Confirmation", {"Release": (meta.name or meta.title) if meta else ""}, hint=message):
+            return await confirm_override(meta, message, default=True)
+
+    async def _ask_douban_link(self, meta: Meta, summary: dict[str, Any], reason: str) -> str:
+        link = await ask(
+            meta,
+            Question(
+                key="douban.url",
+                kind="text",
+                prompt="Please enter Douban link (leave empty to skip)",
+                title="Douban link",
+                hint=f"{reason} Enter a Douban link, or leave it blank to skip.",
+                placeholder="https://movie.douban.com/subject/...",
+                summary={**summary, "Douban link": ""},
+                focus="Douban link",
+                unattended="fail",
+                empty_ok=True,
+            ),
+        )
+        return link or ""
 
     async def _apply_region_distributor(self, meta: Meta, attributes: dict[str, Any], tracker: str = "") -> None:
         region_id = attributes.get("region_id", 0)
@@ -809,9 +849,17 @@ class Common:
                     if meta.unattended:
                         return tmdb, imdb, tvdb, mal, description, category, infohash, imagelist, file_name
                     logger.info("[cyan]Do you want to edit, discard or keep the description?[/cyan]")
-                    edit_choice = cli_ui.ask_string("Enter 'e' to edit, 'd' to discard, or press Enter to keep it as is:")
+                    question, buttons = webui_events.letter_prompt([("e", "edit"), ("d", "discard")], "keep it as is")
+                    with webui_events.field_prompt(
+                        "Tracker description",
+                        {"Tracker": tracker, "Description": description[:1000]},
+                        focus="Description",
+                        hint="Do you want to edit, discard or keep the description?" if webui_events.editor_available() else "Do you want to discard or keep the description?",
+                        actions=buttons,
+                    ):
+                        edit_choice = cli_ui.ask_string(question)
 
-                    if (edit_choice or "").lower() == "e":
+                    if (edit_choice or "").lower() == "e" and webui_events.editor_available():
                         edited_description = cast(str | None, click.edit(cast(Any, description)))
                         if edited_description:
                             description = edited_description.strip()
@@ -888,16 +936,12 @@ class Common:
                             raise KeyError("No data in response")
                     except KeyError, IndexError, TypeError:
                         logger.info("[red]Unable to get data from ptgen using IMDb")
-                        if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                            params["url"] = await prompt_in_thread(cli_ui.ask_string, "Please enter Douban link:", default="") or ""
-                        else:
-                            params["url"] = ""
+                        params["url"] = await self._ask_douban_link(
+                            meta, {"Release": meta.name or meta.title, "IMDb ID": meta.imdb_tt}, "Unable to get data from PT-Gen using IMDb."
+                        )
                 else:
                     logger.info("[red]No IMDb id was found.")
-                    if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                        params["url"] = await prompt_in_thread(cli_ui.ask_string, "Please enter Douban link:", default="") or ""
-                    else:
-                        params["url"] = ""
+                    params["url"] = await self._ask_douban_link(meta, {"Release": meta.name or meta.title}, "No IMDb ID was found for PT-Gen.")
 
                 # Fetch with douban URL
                 ptgen_json = await fetch_ptgen(client, url, params)
@@ -929,7 +973,9 @@ class Common:
     class MediaInfoParser:
         def parse_mediainfo(self, mediainfo_text: str) -> dict[str, Any]:
             # Patterns for matching sections and fields
-            section_pattern = re.compile(r"^(General|Video|Audio|Text|Menu)(?:\s#\d+)?", re.IGNORECASE)
+            # Include every MediaInfo stream kind so attachments (Image) and Other
+            # sections are not merged into the preceding audio or text track.
+            section_pattern = re.compile(r"^(General|Video|Audio|Text|Other|Image|Menu)(?:\s#\d+)?$", re.IGNORECASE)
             parsed_data: dict[str, Any] = {"general": {}, "video": [], "audio": [], "text": []}
             current_section: str | None = None
             current_track: dict[str, str] = {}
@@ -1329,7 +1375,7 @@ class Common:
 
         return f"{resolution} @ {video_bitrate} kbps - {audio} @ {audio_bitrate} kbps"
 
-    def check_and_confirm_adult_media_upload(self, meta: Meta, tracker: str) -> bool:
+    async def check_and_confirm_adult_media_upload(self, meta: Meta, tracker: str) -> bool:
         """
         Check if the media is categorized as adult/pornographic and prompt the user for confirmation before uploading to a non-adult tracker.
 
@@ -1338,13 +1384,8 @@ class Common:
         :return: True if the user confirms or if the media is not adult, False otherwise.
         """
         if meta.adult_media:
-            if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                logger.info(f"[bold red]Pornography is not allowed at {tracker}.[/bold red]")
-                if cli_ui.ask_yes_no("Do you want to upload anyway?", default=False):
-                    pass
-                else:
-                    return False
-            else:
+            logger.info(f"[bold red]Pornography is not allowed at {tracker}.[/bold red]")
+            if not await confirm_override(meta):
                 return False
 
         return True
@@ -1547,11 +1588,19 @@ class Common:
             return ""
 
         # Final fallback: ask user
-        if meta.unattended and not meta.unattended_confirm:
-            logger.info(f"{tracker}: [yellow]Unattended mode: Gêneros não encontrados. Pulando upload para {tracker}.[/yellow]")
-            meta.skipping = f"{tracker}"
-            return ""
-
-        tags_raw = await prompt_in_thread(cli_ui.ask_string, f"Digite os gêneros (no formato do {tracker}): ")
-        raw_list = [unidecode(t.strip()).replace(" ", ".") for t in re.split(r"[,;]", tags_raw or "") if t.strip()]
+        genres = await ask(
+            meta,
+            Question(
+                key="genres.ptbr",
+                kind="list",
+                prompt=f"{tracker}: Digite os gêneros (no formato do {tracker})",
+                title="Gêneros",
+                hint="Gêneros não encontrados. Separe por vírgula; até 5 são usados.",
+                placeholder="ex.: ação, drama",
+                summary={"Tracker": tracker, "Release": meta.name or meta.title, "Gêneros": ""},
+                focus="Gêneros",
+                tracker=tracker,
+            ),
+        )
+        raw_list = [unidecode(t).replace(" ", ".") for t in genres or []]
         return ", ".join(raw_list[:5])

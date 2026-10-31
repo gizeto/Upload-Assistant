@@ -10,6 +10,7 @@ import anitopy
 import cli_ui
 import guessit
 
+from src import webui_events
 from src.cleanup import cleanup_manager
 from src.console import logger
 from src.meta import Meta
@@ -303,7 +304,7 @@ class NameManager:
         lang_display = "" if lang_display.lower() in ("english", "eng", "en") else lang_display.upper().replace("I", "i")
 
         # Source logic: RETAiL, SCAN, HYBRiD
-        source = meta.source or "".strip().upper()
+        source = (meta.source or "").strip().upper()
         manual_source = str(meta.manual_source or "").strip().upper()
         if manual_source in ("RETAIL", "SCAN", "HYBRID"):
             source = manual_source
@@ -367,8 +368,8 @@ class NameManager:
         edition = str(meta.manual_edition or meta.edition or "").strip()
         year = str(meta.manual_year or meta.year or "").strip()
         platform = str(meta.manual_platform or meta.platform or "").strip().upper()
-        game_version = meta.game_version or "".strip()
-        repack = meta.repack or "".strip().upper()
+        game_version = (meta.game_version or "").strip()
+        repack = (meta.repack or "").strip().upper()
         force_multi = bool(meta.manual_multi)
 
         #  language / MULTI tag
@@ -739,7 +740,8 @@ class NameManager:
                 region_id = await self.common.unit3d_region_ids(tracker_region, tracker=tracker)
                 if requirements.get("region") == "mandatory":
                     while not region_id and tracker_region and tracker_region != "SKIPPED":
-                        logger.warning(f"Region '{tracker_region}' is not recognized by {tracker}.")
+                        logger.warning(f"Region '{tracker_region}' is not recognized by {tracker}.", extra={"ua_gui": False})
+                        webui_events.notice("attention", f"Region '{tracker_region}' is not recognized.", tracker=tracker, key=f"region:{tracker}")
                         if meta.unattended and not meta.unattended_confirm:
                             break
                         replacement = await self._prompt_for_field(meta, f"Region code for {tracker} (press Enter to skip this tracker)", True)
@@ -752,7 +754,8 @@ class NameManager:
                 distributor_id = await self.common.unit3d_distributor_ids(distributor_name, tracker=tracker)
                 if requirements.get("distributor") == "mandatory":
                     while not distributor_id and distributor_name and distributor_name != "SKIPPED":
-                        logger.warning(f"Distributor '{distributor_name}' is not recognized by {tracker}.")
+                        logger.warning(f"Distributor '{distributor_name}' is not recognized by {tracker}.", extra={"ua_gui": False})
+                        webui_events.notice("attention", f"Distributor '{distributor_name}' is not recognized.", tracker=tracker, key=f"distributor:{tracker}")
                         if meta.unattended and not meta.unattended_confirm:
                             break
                         replacement = await self._prompt_for_field(meta, f"Distributor for {tracker} (press Enter to skip this tracker)", True)
@@ -767,7 +770,8 @@ class NameManager:
                         reason = f"unsupported region '{tracker_region}'" if tracker_region and tracker_region != "SKIPPED" else "missing region information"
                     else:
                         reason = f"unsupported distributor '{distributor_name}'" if distributor_name and distributor_name != "SKIPPED" else "missing distributor information"
-                    logger.warning(f"Skipping upload to {tracker}: {reason}.")
+                    logger.warning(f"Skipping upload to {tracker}: {reason}.", extra={"ua_gui": False})
+                    webui_events.notice("attention", f"Not uploading: {reason}.", tracker=tracker, key=f"disc-info:{tracker}")
                     trackers_to_remove.append(tracker)
 
         return region_name, distributor_name, trackers_to_remove
@@ -778,8 +782,27 @@ class NameManager:
             return "SKIPPED"
         suffix = " (MANDATORY): " if is_mandatory else " (optional, press Enter to skip): "
         prompt = f"{field_name} not found for disc. Please enter it manually{suffix}"
+        is_region = "region" in field_name.lower()
+        focus = "Region" if is_region else "Distributor"
+        summary: dict[str, Any] = {
+            "Disc": meta.is_disc,
+            "Release": meta.name or meta.title,
+            "Region": "" if is_region else meta.region,
+            "Distributor": "" if not is_region else meta.distributor,
+        }
+        hint = ("The disc's region or 3-letter country code (e.g. USA, GBR, FRA, JPN)." if is_region else "The disc's distributor, as listed on the tracker.") + (
+            " Leaving it blank skips trackers that require it." if is_mandatory else " Leave it blank to skip."
+        )
         try:
-            value = cli_ui.ask_string(prompt)
+            with webui_events.field_prompt(
+                "Disc region" if is_region else "Disc distributor",
+                summary,
+                focus=focus,
+                hint=hint,
+                actions=[("", "Skip this tracker" if is_mandatory else "Skip")],
+                placeholder="e.g. USA, GBR, FRA, JPN" if is_region else "Distributor name",
+            ):
+                value = cli_ui.ask_string(prompt)
             return value.upper() if value else "SKIPPED"
         except EOFError:
             logger.info("\n[red]Exiting on user request (Ctrl+C)[/red]")

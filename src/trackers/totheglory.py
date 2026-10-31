@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 from unidecode import unidecode
 
+from src import payload_preview, webui_events
 from src.cogs.redaction import Redaction
 from src.console import logger, prompt_in_thread
 from src.cookie_auth import CookieValidator
@@ -101,6 +102,9 @@ class ToTheGlory:
         return cookies
 
     async def get_name(self, meta: Meta) -> str:
+        if meta.manual_name is not None:
+            return meta.manual_name.strip()
+
         ttg_name = meta.name
 
         remove_list = ["Dubbed", "Dual-Audio"]
@@ -172,11 +176,71 @@ class ToTheGlory:
         # 60 = TV Shows
         return type_id
 
+    async def get_data(self, meta: Meta, preview: bool = False) -> dict[str, Any]:
+        """Build the upload form; a ``preview`` leaves out the description."""
+        ttg_desc = ""
+        if not preview:
+            await self.edit_desc(meta)
+            async with aiofiles.open(
+                f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt",
+                encoding="utf-8",
+            ) as desc_file:
+                ttg_desc = await desc_file.read()
+        anon = "no" if meta.anon == 0 and not self.config["TRACKERS"][self.tracker].get("anon", False) else "yes"
+        data: dict[str, Any] = {
+            "MAX_FILE_SIZE": "4000000",
+            "team": "",
+            "hr": "no",
+            "name": await self.get_name(meta),
+            "type": await self.get_type_id(meta),
+            "descr": ttg_desc.rstrip(),
+            "anonymity": anon,
+            "nodistr": "no",
+        }
+        if meta.imdb_tt:
+            data["imdb_c"] = meta.imdb_tt
+        return data
+
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The upload form as it is known before screenshots, for the Web UI to show and edit."""
+        specs = {
+            "MAX_FILE_SIZE": payload_preview.readonly("Max file size"),
+            "team": payload_preview.readonly("Team"),
+            "hr": payload_preview.flag("Hit and run", on="yes", off="no"),
+            "name": payload_preview.text("Name"),
+            "type": payload_preview.choice(
+                "Category",
+                [
+                    (52, "Movie 720p"),
+                    (53, "Movie 1080p/i"),
+                    (54, "Movie Blu-ray"),
+                    (108, "4K"),
+                    (109, "4K Blu-ray"),
+                    (58, "Animation"),
+                    (62, "Documentary 720p"),
+                    (63, "Documentary 1080"),
+                    (64, "Documentary Blu-ray"),
+                    (69, "TV 720p EU/US"),
+                    (70, "TV 1080 EU/US"),
+                    (73, "TV Japanese"),
+                    (75, "TV Korean / Chinese 1080"),
+                    (76, "TV Chinese 720p"),
+                    (87, "TV pack EU/US"),
+                    (88, "TV pack Japanese"),
+                    (90, "TV pack Chinese"),
+                    (99, "TV pack Korean"),
+                ],
+            ),
+            "anonymity": payload_preview.flag("Anonymous", on="yes", off="no"),
+            "nodistr": payload_preview.flag("Exclusive", on="yes", off="no"),
+            "imdb_c": payload_preview.text("IMDb ID"),
+        }
+        return payload_preview.describe(self.tracker, await self.get_data(meta, preview=True), specs, deferred={"descr": payload_preview.DESCRIPTION_NOTE})
+
     async def upload(self, meta: Meta) -> bool | None:
         common = Common(config=self.config)
         await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
-        await self.edit_desc(meta)
-        ttg_name = await self.get_name(meta)
+        data = payload_preview.apply_payload_edits(meta, self.tracker, await self.get_data(meta))
 
         # FORM
         # type = category dropdown
@@ -188,15 +252,8 @@ class ToTheGlory:
         #
         # POST > upload/upload
 
-        anon = "no" if meta.anon == 0 and not self.config["TRACKERS"][self.tracker].get("anon", False) else "yes"
-
         mi_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/BD_SUMMARY_00.txt" if meta.bdinfo else f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/MEDIAINFO.txt"
 
-        async with aiofiles.open(
-            f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt",
-            encoding="utf-8",
-        ) as desc_file:
-            ttg_desc = await desc_file.read()
         torrent_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}].torrent"
         filelist = meta.filelist
         async with aiofiles.open(torrent_path, "rb") as torrent_file:
@@ -205,19 +262,7 @@ class ToTheGlory:
         async with aiofiles.open(mi_path, encoding="utf-8") as mi_dump:
             mi_text = await mi_dump.read()
         files = {"file": (f"{torrent_file_name}.torrent", torrent_bytes, "application/x-bittorent"), "nfo": ("torrent.nfo", mi_text)}
-        data: dict[str, Any] = {
-            "MAX_FILE_SIZE": "4000000",
-            "team": "",
-            "hr": "no",
-            "name": ttg_name,
-            "type": await self.get_type_id(meta),
-            "descr": ttg_desc.rstrip(),
-            "anonymity": anon,
-            "nodistr": "no",
-        }
         url = f"{self.base_url}/takeupload.php"
-        if meta.imdb_tt:
-            data["imdb_c"] = meta.imdb_tt
 
         # Submit
         if meta.debug:
@@ -291,7 +336,12 @@ class ToTheGlory:
         if vcookie is not True:
             logger.error(f"{self.tracker}: [red]Failed to validate cookies. Please confirm that the site is up and your passkey is valid.")
             if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                recreate = cli_ui.ask_yes_no("Log in again and create new session?")
+                with webui_events.field_prompt(
+                    f"{self.tracker} session",
+                    {"Tracker": self.tracker},
+                    hint="Failed to validate cookies. Confirm that the site is up and your passkey is valid.",
+                ):
+                    recreate = cli_ui.ask_yes_no("Log in again and create new session?")
                 if recreate is True:
                     if Path(cookiefile).exists():
                         Path(cookiefile).unlink()
@@ -327,8 +377,15 @@ class ToTheGlory:
                 if meta and meta.unattended and not meta.unattended_confirm:
                     logger.error(f"{self.tracker}: [red]Unattended mode: 2FA required. Skipping login.[/red]")
                     return
+                with webui_events.field_prompt(
+                    "Two-factor authentication",
+                    {"Tracker": self.tracker, "2FA code": ""},
+                    focus="2FA code",
+                    hint=f"Enter your {self.tracker} 2FA code to log in.",
+                ):
+                    otp_code = await prompt_in_thread(cli_ui.ask_string, f"{self.tracker} 2FA Code:", default="") or ""
                 two_factor_data: dict[str, Any] = {
-                    "otp": await prompt_in_thread(cli_ui.ask_string, f"{self.tracker} 2FA Code:", default="") or "",
+                    "otp": otp_code,
                     "authenticity_token": auth_token,
                     "uid": self.uid,
                 }

@@ -1,11 +1,10 @@
 # Upload Assistant © 2025 Audionut & wastaken7 — Licensed under UAPL v1.0
 import re
-from typing import Any
-
-import cli_ui
+from typing import Any, ClassVar
 
 from src.console import logger
 from src.get_desc import DescriptionBuilder
+from src.manual_input import confirm_override
 from src.meta import Meta
 from src.rehostimages import ImageHostPolicy, RehostImagesManager
 from src.trackers.common import Common
@@ -19,6 +18,22 @@ class SkipTheCommercials(UNIT3D):
     SkipTheCommercials (STC) is a Private Torrent Tracker for TV and
     documentary movies.
     """
+
+    # Options of the ID fields, offered in the Web UI preview (the getters ignore mapping_only).
+    payload_choices: ClassVar[dict[str, tuple[tuple[str, str], ...]]] = {
+        "type_id": (
+            ("1", "DISC"),
+            ("2", "REMUX"),
+            ("3", "ENCODE"),
+            ("4", "WEBDL"),
+            ("5", "WEBRIP"),
+            ("6", "HDTV"),
+            ("13", "WEB pack"),
+            ("14", "SD WEB pack"),
+            ("17", "SD pack"),
+            ("18", "HD pack"),
+        ),
+    }
 
     tracker = "SKIPTHECOMMERCIALS"
     display_name = "SkipTheCommercials"
@@ -70,13 +85,8 @@ class SkipTheCommercials(UNIT3D):
         genres = ", ".join(str(value) for value in [*(meta.keywords or []), *combined_genres])
         adult_keywords = ["xxx", "erotic", "porn", "adult", "orgy", "hentai", "adult animation", "softcore"]
         if any(re.search(rf"(^|,\s*){re.escape(keyword)}(\s*,|$)", genres, re.IGNORECASE) for keyword in adult_keywords):
-            if not meta.unattended or (bool(meta.unattended) and meta.unattended_confirm):
-                logger.info(f"{self.tracker}: [bold red]Porn is not allowed at {self.tracker}.[/bold red]")
-                if cli_ui.ask_yes_no("Do you want to upload anyway?", default=False):
-                    pass
-                else:
-                    return False
-            else:
+            logger.info(f"{self.tracker}: [bold red]Porn is not allowed at {self.tracker}.[/bold red]")
+            if not await confirm_override(meta):
                 return False
 
         return True

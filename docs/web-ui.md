@@ -32,7 +32,7 @@ Open <http://127.0.0.1:5000> in a browser. The address defaults to `127.0.0.1:50
 
 To capture the current interface for documentation, sign in normally and open the Upload page with `?screenshot=1`, for example `http://127.0.0.1:5000/?screenshot=1`.
 
-This browser-only demo shows the fictional **The Automation Menace (1968)** release with frozen FFmpeg, mkbrr, Usenet, spectrogram, and HDR progress. It does not start an upload, run external tools, load your files or tracker configuration, or send API actions. Existing uploads in other tabs continue normally. Authentication is still required.
+This browser-only demo shows the fictional **The Automation Menace (1968)** release with frozen FFmpeg, mkbrr, Usenet, spectrogram, and HDR progress. The **GUI** output view shows the run paused at a fictional dupe prompt, with a slot recommendation, a warning and tracker results. It does not start an upload, run external tools, load your files or tracker configuration, or send API actions. Existing uploads in other tabs continue normally. Authentication is still required.
 
 Use **Choose poster** and **Choose backdrop** to select your fictional artwork (PNG, JPEG, or WebP, up to 4 MiB per image). The backdrop appears behind the poster. Both images stay in your browser and are remembered there independently when storage is available. The demo includes ten subtitle languages with different flags. Choose the theme and resize the panels normally, then click **Hide controls (H)** before taking the screenshot. Press **H** outside a text field to bring the controls back. **Exit demo**, or removing the query parameter, returns to the normal app.
 
@@ -62,13 +62,13 @@ Docker deployments normally start the WebUI without positional paths, so `UA_BRO
 
 ### Relevant environment variables
 
-| Variable                       | Purpose                                                                                                                |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `UA_BROWSE_ROOTS`              | Comma-separated directories exposed by the File Browser.                                                               |
-| `UA_WEBUI_CORS_ORIGINS`        | Comma-separated origins allowed to call `/api/*` from a different origin. It is not needed for normal same-origin use. |
-| `UA_WEBUI_TRUSTED_PROXY_COUNT` | Number of trusted reverse-proxy hops. Leave unset or `0` for direct access; use `1` for one trusted proxy.             |
-| `SESSION_SECRET`               | Stable session/encryption secret of at least 32 bytes.                                                                 |
-| `SESSION_SECRET_FILE`          | Path to a readable file containing the stable session secret.                                                          |
+| Variable                       | Purpose                                                                                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `UA_BROWSE_ROOTS`              | Comma-separated directories exposed by the File Browser.                                                                                |
+| `UA_WEBUI_CORS_ORIGINS`        | Comma-separated origins allowed to call `/api/*` from a different origin. It is not needed for normal same-origin use; `*` is rejected. |
+| `UA_WEBUI_TRUSTED_PROXY_COUNT` | Number of trusted reverse-proxy hops. Leave unset or `0` for direct access; use `1` for one trusted proxy.                              |
+| `SESSION_SECRET`               | Stable session/encryption secret of at least 32 bytes.                                                                                  |
+| `SESSION_SECRET_FILE`          | Path to a readable file containing the stable session secret.                                                                           |
 
 Provide either `SESSION_SECRET` or `SESSION_SECRET_FILE`, not both. If neither is set, the application creates and persists a secret in its configuration directory. Container deployments must persist that directory or secret across recreations.
 
@@ -78,9 +78,12 @@ The WebUI supports one local account.
 
 On the first visit:
 
-1. Enter a username and strong password.
-2. Choose **Create account**.
-3. Sign in with the new credentials if prompted.
+1. Copy the **setup code** that Upload Assistant prints in its console output (`docker logs` for containers), for example `WebUI first-run setup code: ABCD-EFGH-JKLM`.
+2. Enter the setup code, a username and a strong password.
+3. Choose **Create account**.
+4. Sign in with the new credentials if prompted.
+
+The setup code is shown only in the console, so a visitor who reaches an internet-exposed WebUI before you cannot claim the account. A new code is printed each time the WebUI starts without an account.
 
 The normal sign-in page provides:
 
@@ -135,15 +138,36 @@ The custom order is stored in that browser and does not alter folders on disk.
 The Upload workspace offers several ways to build the upload command:
 
 - type flags directly into **Additional Arguments**;
-- choose an entry in the searchable **Arguments** sidebar;
+- fill in options in the **Arguments** sidebar;
 - choose trackers in **Select Trackers (`-tk`)**; or
 - load a saved argument preset.
 
 To save a preset, enter a name and choose **Save**. Saving an existing name updates it. **Delete** removes the selected preset. Presets are shared through the WebUI data directory, while the selected file-browser order is browser-local.
 
-Argument controls update the same command field, so advanced users can still edit the resulting string directly. The [CLI arguments reference](cli-args.md) explains each available flag.
+#### Arguments sidebar
 
-Choose **Check status** to run a lightweight website-reachability check for the configured trackers. The dot beside each tracker shows available, issue detected, unavailable, or not checked. An affected selected tracker also gets a compact warning with its check age and expandable details; on the Upload page it can be deselected directly from that warning. Results are cached for 15 minutes and reused between the Upload and Configuration pages. These checks do not use tracker credentials and cannot confirm that an account or upload endpoint is working, so warnings never prevent an upload.
+The category buttons at the top (**All**, **Movie**, **TV**, **Music**, **Book**, **Game**, **Other**) show the options that matter for that kind of upload, followed by the options that apply to every upload. Options shared by several categories appear in each of them. When the command contains `--category` (or `-c`), the matching category is selected automatically; you can still pick another one, and it stays selected until the category changes. Search looks through every option, whatever category is selected.
+
+Each option has its own control:
+
+- a checkbox for options without a value, such as `--debug`;
+- a list for options with fixed values, such as `--category`, `--type` or `--imghost`;
+- a text field for other values. Clearing the field keeps the bare option; choose **×** to remove it;
+- a folder button for options that take a server path, such as `--poster` or `--comparison`. It browses the same permitted roots as the File Browser.
+
+**In command** lists the options currently in the command, in order, so you can change or remove each one. Choose ☆ on any option to keep it under **Favorites**; favorites and the selected category are saved in this browser. Choose the expand icon in the sidebar header to open the panel in a larger view, with the command and its warnings below it.
+
+Every control edits only its own part of **Additional Arguments**, so the rest of what you typed is kept, and edits typed into the field show up in the controls. Values that need quoting are quoted the way the server reads them. Below the field, the WebUI warns about unknown options (with a suggestion), missing or invalid values, options set twice, options that cannot be combined (such as `--nohash` and `--rehash`), stray values and unclosed quotes. Warnings never block an upload; the server still validates the command. The [CLI arguments reference](cli-args.md) explains each available flag.
+
+Choose **Check now** under **Tracker status** to run a lightweight website-reachability check for the configured trackers. Its last-check age appears beside the button. The dot beside each tracker shows available, issue detected, unavailable, or not checked. An affected selected tracker also gets a compact warning with its check age and expandable details; on the Upload page it can be deselected directly from that warning. Results are cached for 15 minutes and reused between the Upload and Configuration pages. These checks do not use tracker credentials and cannot confirm that an account or upload endpoint is working, so warnings never prevent an upload.
+
+#### Tracker layout
+
+Keep favourites in the standard **Pinned** group, or create custom groups for the way you work. In the normal tracker selector, each heading shows how many trackers are selected and one button: **Select all** when none or some are selected, or **Deselect all** when every tracker shown in the group is selected. Deselecting one tracker changes the button back to **Select all**. The button updates only the trackers currently shown in that group, including **Pinned** and **Ungrouped**; selections in other groups stay as they are. This action is disabled during a run.
+
+Under **Layout & view**, choose **Edit layout** to show the pin and options buttons beside each tracker. Use a pin to move a tracker into **Pinned** at the top of the selector; unpinning restores its previous group. In edit mode, add named groups, rename headings, and drag trackers between groups or into a new order. The **⋯** options button sits between the tracker name and its pin. It opens **Move to…**, **Move earlier**, and **Move later** actions, keeping these controls hidden until needed. **Move to…** lists **Pinned**, custom groups, and **Ungrouped**, excluding the current group. **Move earlier** and **Move later** reorder within the current group and are disabled at its boundaries. All actions work with touch or a keyboard. **Back** returns from the group choices to the options; **Close** or **Escape** closes the panel. Focus returns to the options button after moving, reordering, or closing. Use the drag handle beside a group name to reorder groups; the name field supports normal text selection and editing. Choose **Done** to hide the editing controls and return to upload selection. **Show all supported trackers** is a toggle button. Its indicator is outlined when off and filled with a checkmark when on. When enabled, unconfigured trackers are also shown. Click it again to show only configured or selected trackers.
+
+Pins, groups and ordering save automatically in the current browser; other browsers and devices have separate layouts. Organising trackers does not select them for upload or change the upload order. Removing a group returns its trackers to **Ungrouped**. **Reset layout** clears the saved organisation after confirmation. Under **Tracker selection**, **Reset to Defaults** restores the configured default tracker selection, and **Clear All** deselects all trackers for the upload. Tracker controls follow the WebUI's selected colour theme, light or dark mode, and square or rounded corner style.
 
 ### Start the upload
 
@@ -187,6 +211,20 @@ While an upload is active, the workspace changes from setup controls to live run
 - **Binary Progress** reports progress from external tools when available.
 - **Now Processing** uses a poster-first live summary with provider identifiers, technical release details, overview, and category-specific metadata for movies, TV, books, music, games, and adult releases.
 - **Kill** terminates the active run.
+
+### Terminal and GUI output
+
+The **Terminal | GUI** switch above the output chooses how the run is shown. The choice is remembered in this browser, and you can switch at any time, including during a run; both views receive the same session.
+
+- **Terminal** shows the full Upload Assistant console, with the input bar for prompts.
+- **GUI** shows the run as a few panels and leaves out what the **Now Processing** preview already shows:
+  - **Stages:** metadata, confirmation, dupe check, screenshots, torrent, upload and requests, each marked as running, done, skipped or stopped. In a queue it also shows the current item.
+  - **Your input is needed:** the current prompt, with Yes/No buttons, a list of choices or a text field. Dupe prompts show the slot recommendation and the possible dupes with their size difference. The confirmation prompt shows the per-tracker release names and any missing fields.
+  - **Needs attention:** slot recommendations, possible dupes, missing region, distributor or IDs, and trackers skipped for missing disc details.
+  - **Errors:** errors, repeated ones counted once, and warnings in a collapsible list. **View in terminal** opens the full output, including tracebacks.
+  - **Results:** one row per tracker: uploaded (with duration and torrent link), failed, queued, dupe, banned or skipped, with the tracker's message. Requests found after the upload are listed with their reward.
+
+The GUI shows the same run as the terminal; answering a prompt in one view answers it in the other.
 
 ### Generated screenshots
 
@@ -324,7 +362,7 @@ Open **Configuration → Access Log** to manage:
 
 The blacklist takes precedence over the whitelist. Repeated failed API access attempts may add the source IP to the blacklist. Review IP changes carefully so that you do not lock out the device or reverse proxy used to administer the WebUI.
 
-The local account, encrypted credentials, token metadata, 2FA state, IP controls, and access-log level are stored in `webui_auth.json`. Access events are written to `access_log.log` in the same application configuration directory. The generated `session_secret` is also stored there unless `SESSION_SECRET` or `SESSION_SECRET_FILE` overrides it.
+The local account, encrypted credentials, token metadata, 2FA state, IP controls, and access-log level are stored in `webui_auth.json`. The WebUI creates its credential files readable only by the account that runs it. On POSIX systems it warns at startup when `config.py`, tracker cookie files, or its own credential files are readable by other users; restrict them with `chmod 600` on shared seedboxes. Access events are written to `access_log.log` in the same application configuration directory. The generated `session_secret` is also stored there unless `SESSION_SECRET` or `SESSION_SECRET_FILE` overrides it.
 
 ### Request limits
 
@@ -369,11 +407,13 @@ The database is stored at `data/stats.sqlite3` below the user-state directory. C
 
 Appearance is shared by the Upload, Configuration, sign-in, and recovery interfaces. Choose:
 
-- a color theme: Amethyst, Charcoal, Evergreen, Graphite, Midnight, or Obsidian;
-- Rounded or Square corners; and
+- a color theme: Amber (the default), Amethyst, Charcoal, Evergreen, Graphite, Midnight, or Obsidian;
+- Rounded (the default) or Square corners; and
 - Light or Dark mode.
 
-These preferences are stored in the browser, so another browser or device can use different choices.
+These preferences are stored in the browser, so another browser or device can use different choices. A browser that already saved a theme or corner style keeps it; choose **Amber** and **Rounded** to switch to the current default look.
+
+The interface uses the bundled Inter and JetBrains Mono typefaces, so it looks the same on every system and needs no font downloads.
 
 ### Help & Resources
 
@@ -438,7 +478,7 @@ Perform a hard refresh or clear the site's cached files after updating Upload As
 
 Use a saved recovery code when possible. If the account cannot be recovered, stop the WebUI and remove `webui_auth.json` from the application configuration directory to return to first-run account setup.
 
-This reset removes the local account, API tokens, 2FA secret, and remaining recovery codes. Keep the persisted session secret intact unless you intentionally need to invalidate encrypted state.
+This reset removes the local account, API tokens, 2FA secret, and remaining recovery codes. Creating the new account also signs out every existing browser session and remember-me cookie. Keep the persisted session secret intact unless you intentionally need to invalidate encrypted state.
 
 Common authentication-state locations are:
 

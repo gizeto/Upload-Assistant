@@ -6,15 +6,16 @@ from typing import Any, ClassVar, cast
 from urllib.parse import urlparse
 
 import aiofiles
-import cli_ui
 import httpx
 from bs4 import BeautifulSoup
 from rich.markup import escape
 
+from src import payload_preview
 from src.cogs.redaction import Redaction
-from src.console import logger, prompt_in_thread
+from src.console import logger
 from src.get_desc import DescriptionBuilder
 from src.languages import languages_manager
+from src.manual_input import Question, ask
 from src.meta import Meta
 from src.rehostimages import RehostImagesManager
 from src.slot_rules.registry import slot_rules_apply
@@ -348,12 +349,21 @@ class GreatPosterWall:
                 tags = ", ".join(unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("utf-8").replace(" ", ".").lower() for name in genre_names)
 
         if not tags:
-            if meta.unattended and not meta.unattended_confirm:
-                logger.info(f"{self.tracker}: [yellow]Unattended mode: Enter genres not available. Skipping {self.tracker} upload.[/yellow]")
-                meta.skipping = f"{self.tracker}"
-                return ""
-            tags_raw = await prompt_in_thread(cli_ui.ask_string, f"Enter the genres (in {self.tracker} format): ")
-            tags = (tags_raw or "").strip()
+            genres = await ask(
+                meta,
+                Question(
+                    key="greatposterwall.genres",
+                    kind="list",
+                    prompt=f"{self.tracker}: Enter the genres (in {self.tracker} format)",
+                    title="Genres",
+                    hint=f"No genres were found. Comma-separated, in {self.tracker} format.",
+                    placeholder="e.g. action, drama",
+                    summary={"Tracker": self.tracker, "Release": meta.name or meta.title, "Genres": ""},
+                    focus="Genres",
+                    tracker=self.tracker,
+                ),
+            )
+            tags = ", ".join(genres or [])
 
         return tags
 
@@ -827,28 +837,57 @@ class GreatPosterWall:
             english_name = first_director_name
             chinese_name = ""
         else:
-            if meta.unattended and not meta.unattended_confirm:
-                logger.info(f"{self.tracker}: [yellow]Unattended mode: Director details required for movie missing in database. Skipping {self.tracker} upload.[/yellow]")
-                meta.skipping = f"{self.tracker}"
-                return {}
             logger.info(f"{self.tracker}: This movie is not registered in the {self.tracker} database, please enter the details of 1 director")
 
-            imdb_id = ""
-            while not re.match(r"^nm\d+$", imdb_id):
-                imdb_id_raw = await prompt_in_thread(cli_ui.ask_string, "Enter Director IMDb ID (e.g., nm0000138): ")
-                imdb_id = (imdb_id_raw or "").strip()
-                if not re.match(r"^nm\d+$", imdb_id):
-                    logger.info(f"{self.tracker}: [red]Invalid IMDb person ID. Format must be like nm0000138.[/red]")
-
-            english_name = ""
-            while not english_name:
-                english_name_raw = await prompt_in_thread(cli_ui.ask_string, "Enter Director English name: ")
-                english_name = (english_name_raw or "").strip()
-                if not english_name:
-                    logger.info(f"{self.tracker}: [red]Director English name cannot be empty.[/red]")
-
-            chinese_name_raw = await prompt_in_thread(cli_ui.ask_string, "Enter Director Chinese name (optional, press Enter to skip): ")
-            chinese_name = (chinese_name_raw or "").strip()
+            imdb_id = await ask(
+                meta,
+                Question(
+                    key="greatposterwall.director_imdb",
+                    kind="text",
+                    prompt="Enter Director IMDb ID (e.g., nm0000138)",
+                    title="Director",
+                    hint=f"This movie is not in the {self.tracker} database; enter one director's IMDb person ID.",
+                    placeholder="nm0000138",
+                    summary={"Tracker": self.tracker, "Release": meta.name or meta.title, "IMDb ID": ""},
+                    focus="IMDb ID",
+                    tracker=self.tracker,
+                    validate=lambda value: None if re.match(r"^nm\d+$", value) else "Invalid IMDb person ID. Format must be like nm0000138.",
+                ),
+            )
+            if imdb_id is None:
+                meta.skipping = self.tracker
+                return {}
+            english_name = await ask(
+                meta,
+                Question(
+                    key="greatposterwall.director_name",
+                    kind="text",
+                    prompt="Enter Director English name",
+                    title="Director",
+                    hint="The director's name in English.",
+                    summary={"Tracker": self.tracker, "IMDb ID": imdb_id, "English name": ""},
+                    focus="English name",
+                    tracker=self.tracker,
+                ),
+            )
+            if english_name is None:
+                meta.skipping = self.tracker
+                return {}
+            chinese_name = await ask(
+                meta,
+                Question(
+                    key="greatposterwall.director_chinese_name",
+                    kind="text",
+                    prompt="Enter Director Chinese name (optional, press Enter to skip)",
+                    title="Director",
+                    hint="Optional: the director's name in Chinese. Leave it blank to skip.",
+                    summary={"Tracker": self.tracker, "IMDb ID": imdb_id, "English name": english_name, "Chinese name": ""},
+                    focus="Chinese name",
+                    tracker=self.tracker,
+                    unattended="default",
+                    default="",
+                ),
+            )
 
         artists: list[str] = [english_name]
         artist_ids: list[str] = [imdb_id]
@@ -1059,16 +1098,18 @@ class GreatPosterWall:
             return resolution.lower()
         return "Other"
 
-    async def fetch_data(self, meta: Meta) -> dict[str, Any]:
+    async def fetch_data(self, meta: Meta, preview: bool = False) -> dict[str, Any]:
+        """Build the upload form; a ``preview`` skips the group lookup, the description and MediaInfo."""
         await self.load_localized_data(meta)  #  keep this line FIRST to ensure localized data is loaded before proceeding
-        await self.get_groupid(meta)
+        if not preview:
+            await self.get_groupid(meta)
         remaster_title = self.get_remaster_title(meta)
         codec = self.get_codec(meta)
         container = self.get_container(meta)
 
         data: dict[str, Any] = {}
 
-        if not GreatPosterWall.group_id:
+        if not preview and not GreatPosterWall.group_id:
             data.update(await self.get_additional_data(meta))
 
         data.update(
@@ -1077,11 +1118,11 @@ class GreatPosterWall:
                 "codec": codec,
                 "container_other": meta.container if container == "Other" else "",
                 "container": container,
-                "mediainfo[]": await self.get_media_info(meta),
+                "mediainfo[]": None if preview else await self.get_media_info(meta),
                 "movie_edition_information": "on" if remaster_title else "",
                 "processing_other": self.get_processing_other(meta) if meta.type == "DISC" else "",
                 "processing": self.get_processing(meta),
-                "release_desc": await self.get_release_desc(meta),
+                "release_desc": None if preview else await self.get_release_desc(meta),
                 "remaster_custom_title": "",
                 "remaster_title": remaster_title,
                 "remaster_year": "",
@@ -1095,7 +1136,7 @@ class GreatPosterWall:
                 "subtitles[]": await self.get_subtitle(meta),
             }
         )
-        if GreatPosterWall.group_id:
+        if not preview and GreatPosterWall.group_id:
             data["groupid"] = GreatPosterWall.group_id
 
         if await self.get_ch_dubs(meta):
@@ -1123,11 +1164,43 @@ class GreatPosterWall:
 
         return data
 
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The upload form as it is known before screenshots, for the Web UI to show and edit."""
+        checkboxes = {
+            "movie_edition_information": "Edition information",
+            "chinese_dubbed": "Chinese dub",
+            "special_effects_subtitles": "Special effects subtitles",
+            "scene": "Scene",
+            "buy": "Bought disc",
+            "diy": "DIY",
+            "jinzhuan": "Exclusive",
+            "dolby_atmos": "Dolby Atmos",
+            "dts_x": "DTS:X",
+            "audio_51": "5.1 audio",
+            "audio_71": "7.1 audio",
+        }
+        specs = {key: payload_preview.flag(label, on="on", off=None) for key, label in checkboxes.items()}
+        specs["movie_edition_information"] = payload_preview.flag("Edition information", on="on", off="")
+        specs.update(
+            {
+                "subtitle_type": payload_preview.choice("Subtitles", [("1", "Softcoded"), ("2", "Hardcoded"), ("3", "None")]),
+                "subtitles[]": payload_preview.readonly("Subtitle languages"),
+                "submit": payload_preview.readonly("Submit"),
+            }
+        )
+        deferred = {
+            "groupid": "Found on the tracker at upload time; a new group also sends its title, poster and tags",
+            "release_desc": payload_preview.DESCRIPTION_NOTE,
+            "mediainfo[]": "Read from the MediaInfo/BDInfo report at upload time",
+        }
+        data = await self.fetch_data(meta, preview=True)
+        return payload_preview.describe(self.tracker, data, specs, deferred=deferred)
+
     async def upload(self, meta: Meta) -> bool:
         if getattr(meta, "skipping", None) == self.tracker:
             return False
         await self.common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
-        data = await self.fetch_data(meta)
+        data = payload_preview.apply_payload_edits(meta, self.tracker, await self.fetch_data(meta))
         if getattr(meta, "skipping", None) == self.tracker:
             return False
 

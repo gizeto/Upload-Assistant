@@ -8,14 +8,15 @@ from pathlib import Path
 from typing import Any, cast
 
 import aiofiles
-import cli_ui
 import httpx
 from bs4 import BeautifulSoup
 
+from src import payload_preview
 from src.bbcode import BBCODE
-from src.console import logger, prompt_in_thread
+from src.console import logger
 from src.cookie_auth import CookieAuthUploader, CookieValidator
 from src.exceptions import *  # noqa F403
+from src.manual_input import Question, ask
 from src.mediainfo import MediaInfo
 from src.meta import Meta
 from src.trackers.common import Common
@@ -330,13 +331,12 @@ class AlphaRatio:
                     if match:
                         auth_key = match.group(1)
                         # Save it for next time
-                        from src.cookie_auth import find_cookie_file
+                        from src.cookie_auth import find_cookie_file, write_owner_only_text
 
                         cookie_file = find_cookie_file(meta.base_dir, self.tracker, self.config)
                         auth_file = cookie_file.replace(".txt", "_auth.txt")
                         with contextlib.suppress(Exception):
-                            async with aiofiles.open(auth_file, "w", encoding="utf-8") as f:
-                                await f.write(auth_key)
+                            write_owner_only_text(auth_file, auth_key)
                             logger.info(f"{self.tracker}: [green]Auth key saved for future use[/green]")
                         return auth_key
         except Exception as e:
@@ -344,37 +344,8 @@ class AlphaRatio:
 
         return None
 
-    async def upload(self, meta: Meta) -> bool:
-        """Upload torrent to ALPHARATIO using centralized cookie_upload."""
-        # Prepare the data for the upload
-        common = Common(config=self.config)
-        await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
-        await self.edit_desc(meta)
-        type_id = await self.get_type(meta)
-
-        # Read the description
-        desc_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt"
-        try:
-            async with aiofiles.open(desc_path, encoding="utf-8") as desc_file:
-                desc = await desc_file.read()
-        except FileNotFoundError:
-            meta.tracker_status[self.tracker]["status_message"] = f"data error: Description file not found at {desc_path}"
-            return False
-
-        # Handle cover image input
-        imdb_info = cast(dict[str, Any], meta.imdb_info or {})
-        cover = meta.artwork_url or imdb_info.get("cover", None)
-        if cover is None:
-            if meta.unattended and not meta.unattended_confirm:
-                logger.info(f"{self.tracker}: [yellow]Unattended mode: No cover image found. Skipping {self.tracker} upload.[/yellow]")
-                meta.skipping = f"{self.tracker}"
-                return False
-            while cover is None:
-                cover = await prompt_in_thread(cli_ui.ask_string, "No Cover was found. Please input a link to a cover:", default="") or ""
-                if not re.match(r"https?://.*\.(jpg|png|gif)$", cover):
-                    logger.info(f"{self.tracker}: [red]Invalid image link. Please enter a link that ends with .jpg, .png, or .gif.")
-                    cover = None
-
+    @staticmethod
+    def get_tags(meta: Meta) -> str:
         # Tag Compilation
         genres_raw = meta.genres
         genres = ""
@@ -397,6 +368,86 @@ class AlphaRatio:
             tags += f"{meta.imdb_tt}, "
         if genres:
             tags += f"{genres}, "
+        return tags
+
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The upload form as it is known before screenshots, for the Web UI to show and edit."""
+        imdb_info = cast(dict[str, Any], meta.imdb_info or {})
+        cover = meta.artwork_url or imdb_info.get("cover", None)
+        data: dict[str, Any] = {"submit": "true", "type": await self.get_type(meta), "title": await self.get_name(meta), "tags": self.get_tags(meta)}
+        deferred = {"desc": payload_preview.DESCRIPTION_NOTE}
+        if cover is None:
+            deferred["image"] = "Asked for after this question"
+        else:
+            data["image"] = cover
+        specs = {
+            "submit": payload_preview.readonly("Submit"),
+            "type": payload_preview.choice(
+                "Category",
+                [
+                    ("0", "TV SD"),
+                    ("1", "TV HD"),
+                    ("2", "TV UHD"),
+                    ("4", "TV pack SD"),
+                    ("5", "TV pack HD"),
+                    ("6", "TV pack UHD"),
+                    ("7", "Movie SD"),
+                    ("8", "Movie HD"),
+                    ("9", "Movie UHD"),
+                    ("13", "Movie XXX"),
+                    ("14", "Blu-ray disc / remux"),
+                    ("15", "Anime SD"),
+                    ("16", "Anime HD"),
+                ],
+            ),
+            "title": payload_preview.text("Name"),
+            "tags": payload_preview.text("Tags", max_length=1000),
+            "image": payload_preview.text("Cover URL", max_length=1000),
+        }
+        return payload_preview.describe(self.tracker, data, specs, deferred=deferred, name_key="title")
+
+    async def upload(self, meta: Meta) -> bool:
+        """Upload torrent to ALPHARATIO using centralized cookie_upload."""
+        # Prepare the data for the upload
+        common = Common(config=self.config)
+        await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
+        await self.edit_desc(meta)
+        type_id = await self.get_type(meta)
+
+        # Read the description
+        desc_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt"
+        try:
+            async with aiofiles.open(desc_path, encoding="utf-8") as desc_file:
+                desc = await desc_file.read()
+        except FileNotFoundError:
+            meta.tracker_status[self.tracker]["status_message"] = f"data error: Description file not found at {desc_path}"
+            return False
+
+        # Handle cover image input
+        imdb_info = cast(dict[str, Any], meta.imdb_info or {})
+        cover = meta.artwork_url or imdb_info.get("cover", None)
+        if cover is None:
+            cover = await ask(
+                meta,
+                Question(
+                    key="alpharatio.cover",
+                    kind="text",
+                    prompt=f"{self.tracker}: No Cover was found. Please input a link to a cover",
+                    title="Cover",
+                    hint="No cover was found. Enter a link to an image ending in .jpg, .png or .gif.",
+                    placeholder="https://",
+                    summary={"Tracker": self.tracker, "Release": meta.name or meta.title, "Cover": ""},
+                    focus="Cover",
+                    tracker=self.tracker,
+                    validate=lambda link: (
+                        None if re.match(r"https?://.*\.(jpg|png|gif)$", link) else "Invalid image link. Please enter a link that ends with .jpg, .png, or .gif."
+                    ),
+                ),
+            )
+            if cover is None:
+                return False
+
+        tags = self.get_tags(meta)
 
         # Get auth key
         auth_key = await self.get_auth_key(meta)

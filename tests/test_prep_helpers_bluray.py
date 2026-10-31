@@ -2,6 +2,7 @@
 
 import pytest
 
+from src.bluray_com import country_flag_code
 from src.meta import Meta
 from src.prep_helpers import _should_add_bluray_link, _should_fetch_bluray_info
 
@@ -27,15 +28,21 @@ def test_bluray_lookup_skips_when_region_and_distributor_are_present() -> None:
 
 
 @pytest.mark.parametrize("disc", ["BDMV", "DVD"])
-@pytest.mark.parametrize("get_info", [False, True])
 @pytest.mark.parametrize("region, distributor", [("", ""), ("USA", ""), ("", "BFI"), ("USA", "BFI")])
-def test_link_lookup_runs_regardless_of_metadata_options(disc, get_info, region, distributor):
+def test_link_lookup_runs_regardless_of_metadata_options(disc, region, distributor):
     meta = Meta(is_disc=disc, imdb_id=1234567, region=region, distributor=distributor)
-    assert _should_fetch_bluray_info(meta, get_info, add_bluray_link=True)
+    assert _should_fetch_bluray_info(meta, True, add_bluray_link=True)
+
+
+@pytest.mark.parametrize("region, distributor", [("", ""), ("USA", "TEST DISTRIBUTOR")])
+@pytest.mark.parametrize("edit", [False, True])
+def test_link_lookup_requires_get_bluray_info(region, distributor, edit):
+    meta = Meta(is_disc="BDMV", imdb_id=1234567, region=region, distributor=distributor, edit=edit)
+    assert not _should_fetch_bluray_info(meta, False, add_bluray_link=True)
 
 
 def test_link_lookup_runs_in_edit_mode():
-    assert _should_fetch_bluray_info(Meta(is_disc="BDMV", imdb_id=1234567, edit=True), False, True)
+    assert _should_fetch_bluray_info(Meta(is_disc="BDMV", imdb_id=1234567, edit=True), True, True)
 
 
 @pytest.mark.parametrize("meta", [Meta(is_disc=""), Meta(is_disc="BDMV", imdb_id=0), Meta(is_disc="BDMV", imdb_id=1234567, site_check=True)])
@@ -53,3 +60,11 @@ def test_link_lookup_respects_tracker_configuration(default, override, expected,
 def test_link_lookup_uses_configured_default_trackers():
     config = {"DEFAULT": {"add_bluray_link": False}, "TRACKERS": {"default_trackers": "aither, lst", "AITHER": {"add_bluray_link": True}, "LST": {"add_bluray_link": False}}}
     assert _should_add_bluray_link(Meta(), config)
+
+
+@pytest.mark.parametrize(
+    ("country", "code"),
+    [("United States", "us"), ("South Korea", "kr"), ("Russia", "ru"), ("Chinese Taipei", "tw"), ("Unknown", ""), (None, "")],
+)
+def test_country_flag_code_names_bundled_flags(country, code) -> None:
+    assert country_flag_code(country) == code

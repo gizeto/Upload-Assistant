@@ -1,7 +1,7 @@
 # Upload Assistant © 2025 Audionut & wastaken7 — Licensed under UAPL v1.0
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from src.console import logger
 from src.meta import Meta
@@ -15,6 +15,32 @@ class Portugas(UNIT3D):
     """
     Portugas is a PORTUGUESE Private Torrent Tracker for 0DAY / GENERAL
     """
+
+    # Options of the ID fields, offered in the Web UI preview (the getters ignore mapping_only).
+    payload_choices: ClassVar[dict[str, tuple[tuple[str, str], ...]]] = {
+        "type_id": (
+            ("1", "DISC"),
+            ("2", "REMUX"),
+            ("3", "ENCODE"),
+            ("4", "WEBDL"),
+            ("39", "WEBRIP"),
+            ("6", "HDTV"),
+        ),
+        "resolution_id": (
+            ("1", "4320p"),
+            ("2", "2160p"),
+            ("13", "1440p"),
+            ("3", "1080p"),
+            ("4", "1080i"),
+            ("5", "720p"),
+            ("6", "576p"),
+            ("7", "576i"),
+            ("11", "540p"),
+            ("8", "480p"),
+            ("9", "480i"),
+            ("10", "Other"),
+        ),
+    }
 
     tracker = "PORTUGAS"
     display_name = "Portugas"
@@ -56,6 +82,9 @@ class Portugas(UNIT3D):
         return {"resolution_id": resolution_id}
 
     async def get_name(self, meta: Meta) -> dict[str, str]:
+        if meta.manual_name is not None:
+            return {"name": meta.manual_name.strip()}
+
         name = meta.name.replace(" ", ".")
 
         pt_name = name
@@ -96,7 +125,7 @@ class Portugas(UNIT3D):
                         media_info_text = f.read()
 
                     if not found_portuguese_audio:
-                        audio_sections = re.findall(r"Audio(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE)
+                        audio_sections = re.findall(r"Audio(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Other|Image|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE)
                         for section in audio_sections:
                             language_match = re.search(r"Language\s*:\s*(.+)", section, re.IGNORECASE)
                             title_match = re.search(r"Title\s*:\s*(.+)", section, re.IGNORECASE)
@@ -143,9 +172,11 @@ class Portugas(UNIT3D):
                         media_info_text = f.read()
 
                     if not found_portuguese_subtitle:
-                        text_sections = re.findall(r"Text(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE)
+                        text_sections = re.findall(r"Text(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Other|Image|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE)
                         if not text_sections:
-                            text_sections = re.findall(r"Subtitle(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE)
+                            text_sections = re.findall(
+                                r"Subtitle(?: #\d+)?\s*\n(.*?)(?=\n\n(?:Audio|Video|Text|Other|Image|Menu)|$)", media_info_text, re.DOTALL | re.IGNORECASE
+                            )
 
                         for section in text_sections:
                             language_match = re.search(r"Language\s*:\s*(.+)", section, re.IGNORECASE)

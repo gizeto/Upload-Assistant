@@ -19,6 +19,7 @@ import langcodes
 import pycountry
 from bs4 import BeautifulSoup
 
+from src import payload_preview, webui_events
 from src.binaries import configured_binary
 from src.cogs.redaction import Redaction
 from src.config_helpers import format_terminal_link
@@ -1612,7 +1613,8 @@ class MakingOff:
         for k, (fid, name) in forum_options.items():
             logger.info(f"{self.tracker}:   {k}) {name} (ID: {fid})")
 
-        raw_choice = await prompt_in_thread(cli_ui.ask_string, "Escolha: ")
+        with webui_events.numbered_options([f"{name} (ID: {fid})" for fid, name in forum_options.values()]):
+            raw_choice = await prompt_in_thread(cli_ui.ask_string, "Escolha: ")
         choice = (raw_choice or "").strip()
         if choice in forum_options:
             return forum_options[choice][0]
@@ -1799,7 +1801,8 @@ class MakingOff:
         logger.info(f"{self.tracker}: [yellow]Any subtitles?[/yellow]")
         for k, v in options.items():
             logger.info(f"{self.tracker}:   {k}) {v}")
-        raw_selection = await prompt_in_thread(cli_ui.ask_string, "Choose: ")
+        with webui_events.numbered_options(list(options.values()), hint=f"{self.tracker}: Any Portuguese subtitles?"):
+            raw_selection = await prompt_in_thread(cli_ui.ask_string, "Choose: ")
         selection = (raw_selection or "").strip()
         return options.get(selection, "Sem Legenda")
 
@@ -1998,6 +2001,13 @@ class MakingOff:
 
         return True
 
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The forum topic as it is known before screenshots, for the Web UI to show and edit."""
+        data = {"title": await self.get_name(meta), "node_id": await self.get_forum_id(meta), "prefix": self._topic_prefix_category(meta)}
+        specs = {"title": payload_preview.text("Topic title"), "node_id": payload_preview.readonly("Subforum ID"), "prefix": payload_preview.readonly("Topic prefix")}
+        deferred = {"message": payload_preview.DESCRIPTION_NOTE, "tags": "Taken from the post at upload time"}
+        return payload_preview.describe(self.tracker, data, specs, deferred=deferred, name_key="title")
+
     async def upload(self, meta: Meta) -> bool:
         """
         Upload a release by creating a forum topic with the torrent as attachment.
@@ -2051,8 +2061,9 @@ class MakingOff:
                     return False
                 sub_files = []
 
+        # The topic title, with any change made in the Web UI.
+        topic_title = str(payload_preview.apply_payload_edits(meta, self.tracker, {"title": await self.get_name(meta)})["title"])
         if meta.debug:
-            topic_title = await self.get_name(meta)
             post_body = await self.generate_description(meta)
             topic_tags = self._topic_tags(meta, post_body)
 
@@ -2110,7 +2121,6 @@ class MakingOff:
                 meta["tracker_status"][self.tracker]["status_message"] = "data error: Failed to upload Portuguese subtitle attachment."
                 return False
 
-        topic_title = await self.get_name(meta)
         post_body = await self.generate_description(meta)
         topic_tags = self._topic_tags(meta, post_body)
 

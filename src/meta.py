@@ -12,6 +12,7 @@ _TRACKER_ID_ALIASES = {
     "BLU": "BLUTOPIA",
     "BTN": "BROADCASTHENET",
     "DVL": "DREADVAULT",
+    "THN": "TORRENTHAVEN",
     "BROADCASTHENET": "BROADCASTHENET",
     "HDB": "HDBITS",
     "HUNO": "HAWKEUNO",
@@ -34,6 +35,8 @@ class Meta:
     aka: str = ""
     anime: bool = False
     anon: bool = False
+    # Pre-answers from --answer KEY=VALUE (see src/manual_input.py).
+    answers: dict[str, str] = field(default_factory=dict)
     ant_user_tags: bool | None = None
     archive_password: str | None = None
     args_line_queue: bool | None = None
@@ -80,6 +83,7 @@ class Meta:
     bluray_cover_urls: dict[str, Any] = field(default_factory=dict)
     bluray_score: int = 100
     bluray_single_score: int = 100
+    bluray_url: str = ""
     book_asin: str | None = None
     book_author: str | None = None
     book_isbn: str | None = None
@@ -99,6 +103,7 @@ class Meta:
     clean_name: str = ""
     cleanup: bool = False
     client: str | None = None
+    client_skipped_trackers: list[str] = field(default_factory=list)
     combined_genres: list[str] | str = field(default_factory=list)
     comic: bool = False
     content_duration_category: str = ""
@@ -281,6 +286,8 @@ class Meta:
     mal_manual: str | int | None = None
     mal: int | None = None
     manga: bool = False
+    # Answers given to src/manual_input.py questions; reloaded from meta.json.
+    manual_answers: dict[str, Any] = field(default_factory=dict)
     manual_category: str | None = None
     manual_commentary: bool = False
     manual_data: str | None = None
@@ -326,6 +333,14 @@ class Meta:
     music_release_type: str = ""
     music_release_year: int = 0
     music_release: dict[str, Any] = field(default_factory=dict)
+    music_unknown_release: bool = False
+    music_artist_roles: str = ""
+    music_request_id: str = ""
+    music_group_id: str = ""
+    music_watermark: str = ""
+    music_lineage: str = ""
+    music_showcase: bool = False
+    music_check_log: bool = False
     name_notag: str = ""
     name: str = ""
     narrator: str = ""
@@ -403,6 +418,8 @@ class Meta:
     regex_year: str = ""
     region: str = ""
     region_overrides: dict[str, str] = field(default_factory=dict)
+    # Upload form fields changed per tracker in the Web UI; None leaves a field out.
+    payload_edits: dict[str, dict[str, Any]] = field(default_factory=dict)
     refundable: bool = False
     rehash: bool = False
     rehosted_artwork_url: str | None = None
@@ -474,6 +491,8 @@ class Meta:
     skip_upload_trackers: list[Any] = field(default_factory=list)
     skip_uploading: int | bool = False
     skipit: bool = False
+    # The user chose to skip this release at the confirmation prompt.
+    skipped_by_user: bool = False
     skipping: str | None = None
     sorted_filelist: bool = False
     source_size: int = 0

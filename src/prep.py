@@ -8,6 +8,7 @@ from typing import Any, cast
 from src.artwork import prepare_artwork
 from src.bluray_com import reset_release_subheader_cache
 from src.content_duration import populate_content_duration
+from src.manual_input import load_saved_answers
 from src.meta import Meta
 from src.meta_file import write_meta_file
 from src.metadata_cache import set_run_disabled
@@ -171,6 +172,7 @@ class Prep:
 
         # 1. Init metadata settings
         use_sonarr, use_radarr, client, skip_tracker_descriptions, hash_ids, tracker_ids = prep_helpers.init_meta(self, meta, mode)
+        await load_saved_answers(meta)
         await self._publish_initial_webui_snapshot(meta)
 
         # 2. Disc and Category Detection
@@ -185,6 +187,9 @@ class Prep:
             await self._gather_music_prep(meta)
             prep_helpers.calculate_source_size(self, meta, str(meta.path or ""))
             await prep_helpers.process_trackers_and_torrent(self, meta, client, hash_ids, tracker_ids, "", "")
+            # Hash or reuse the base torrent while external lookups and the
+            # music metadata prompts run, as the video path does.
+            await restart_early_artifact_tasks(meta, client, self.config)
             await _enrich_music_from_orpheus_fn(meta, self.config)
             await _enrich_music_from_discogs_fn(meta, self.config)
             await prepare_artwork(meta)
@@ -258,6 +263,8 @@ class Prep:
         # starts consuming the generated files. Any error is logged by the
         # helper; the existing upload-stage capture remains the fallback.
         if early_screenshots_task is not None:
+            if not early_screenshots_task.done():
+                logger.info("[yellow]Waiting for screenshots to finish...[/yellow]")
             early_meta = await early_screenshots_task
             if early_meta is not None:
                 if early_meta.tonemapped:
@@ -285,14 +292,18 @@ class Prep:
         """Generate local screenshots while metadata and tracker IDs are fetched."""
         if meta.keep_images:
             return None
-        if meta.category in ("MUSIC", "GAME", "BOOK") or meta.screens <= 0:
+        if meta.category in ("MUSIC", "GAME") or meta.audiobook or meta.screens <= 0:
             return None
         if _frame_overlay_requires_late_capture(meta, self.config):
             logger.debug("[cyan]Deferring frame-overlay screenshots until tracker upload eligibility is known.[/cyan]")
             return None
 
         try:
-            if meta.is_disc == "BDMV":
+            if meta.category == "BOOK":
+                # Pages only: the cover and banner depend on metadata searched meanwhile.
+                if videopath:
+                    await self.takescreens_manager.ebook_page_screenshots(videopath, filename, meta.uuid, meta.base_dir, meta)
+            elif meta.is_disc == "BDMV":
                 await self.takescreens_manager.disc_screenshots(
                     meta,
                     meta.filename or filename,

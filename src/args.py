@@ -15,6 +15,7 @@ import argcomplete
 
 from src.app_paths import DATA_DIR
 from src.audible import normalize_audible_url
+from src.bluray_com import normalize_bluray_url
 
 if TYPE_CHECKING:
     from src.meta import Meta
@@ -177,6 +178,7 @@ Common options:
   -ov, --overview            Overview/synopsis override for any category
   --genres                   Comma-separated genre override for any category
   --tracker-id               Tracker torrent ID (example: --tracker-id AITHER=1234)
+  --answer                   Pre-answer a manual question (example: --answer game.subcategory=dlc; --answer help lists keys)
   -serv, --service           Streaming service
   --no-aka                   Remove AKA from title
   -daily, --daily            Air date of a daily type episode (YYYY-MM-DD)
@@ -209,21 +211,89 @@ class CustomArgumentParser(argparse.ArgumentParser):
 
 
 @lru_cache(maxsize=1)
-def cli_argument_catalog() -> tuple[dict[str, str], ...]:
-    """Expose the parser's actual long options and help text to the WebUI."""
+def _reference_parser() -> argparse.ArgumentParser:
+    """Build the real parser once, to read its options without parsing a run."""
     from src.meta import Meta
 
     _, parser, _ = Args({"DEFAULT": {"screens": 1}}).parse(["--webui"], Meta())
-    catalog = []
+    return parser
+
+
+def _webui_argument_kind(action: argparse.Action) -> str:
+    """Tell the WebUI which control edits an option: a toggle, a list, or text."""
+    if action.nargs == 0:
+        return "flag"
+    if action.choices:
+        return "choice"
+    if isinstance(action, argparse._AppendAction):
+        return "append"
+    if action.nargs in ("*", "+"):
+        return "multi"
+    return "value"
+
+
+def _webui_argument_conflicts(parser: argparse.ArgumentParser) -> dict[int, set[str]]:
+    """Map each action to the long options it cannot be combined with."""
+    conflicts: dict[int, set[str]] = {}
+
+    def link(actions: list[argparse.Action]) -> None:
+        for action in actions:
+            others = {option for other in actions if other is not action for option in other.option_strings if option.startswith("--")}
+            conflicts.setdefault(id(action), set()).update(others)
+
+    for group in parser._mutually_exclusive_groups:
+        link(list(group._group_actions))
+    by_dest: dict[str, list[argparse.Action]] = {}
+    for action in parser._actions:
+        by_dest.setdefault(action.dest, []).append(action)
+    for actions in by_dest.values():
+        # Opposite switches such as --music-enrich and --no-music-enrich share a dest.
+        if len(actions) > 1:
+            link(actions)
+    return conflicts
+
+
+@lru_cache(maxsize=1)
+def cli_argument_catalog() -> tuple[dict[str, Any], ...]:
+    """Expose the parser's actual long options, help text and value shape to the WebUI."""
+    parser = _reference_parser()
+    conflicts = _webui_argument_conflicts(parser)
+    catalog: list[dict[str, Any]] = []
     for action in parser._actions:
         for option in action.option_strings:
             if not option.startswith("--") or option in WEBUI_UNSUPPORTED_OPTIONS:
                 continue
-            item = {"label": option, "description": "" if action.help == argparse.SUPPRESS else str(action.help or "")}
+            item: dict[str, Any] = {
+                "label": option,
+                "description": "" if action.help == argparse.SUPPRESS else str(action.help or ""),
+                "kind": _webui_argument_kind(action),
+            }
             if action.nargs != 0:
                 item["placeholder"] = str(action.metavar or action.dest).upper()
+            if action.choices:
+                item["choices"] = [str(choice) for choice in action.choices]
+                # argparse converts with `type` before checking choices, so "PC" is valid here.
+                if action.type in (str.lower, str.casefold):
+                    item["case_insensitive"] = True
+            aliases = [other for other in action.option_strings if other != option]
+            if aliases:
+                item["aliases"] = aliases
+            if conflicts.get(id(action)):
+                item["conflicts"] = sorted(conflicts[id(action)])
             catalog.append(item)
     return tuple(catalog)
+
+
+@lru_cache(maxsize=1)
+def cli_option_choices() -> dict[str, tuple[str, ...]]:
+    """Return the accepted values of each long option that has a fixed list."""
+    return {
+        option: tuple(str(choice) for choice in action.choices)
+        for action in _reference_parser()._actions
+        if action.choices
+        for option in action.option_strings
+        if option.startswith("--")
+    }
 
 
 def tracker_cli_aliases(config: Mapping[str, Any]) -> dict[str, str]:
@@ -511,6 +581,48 @@ class Args:
             "--music-release-year", nargs=1, required=False, help="MUSIC: concrete release/pressing year (not the original group year)", dest="music_release_year"
         )
         parser.add_argument("--music-edition-year", nargs=1, required=False, help="MUSIC: remaster/reissue/edition year", dest="music_edition_year")
+        parser.add_argument(
+            "--music-unknown-release",
+            action="store_true",
+            default=None,
+            help="MUSIC: mark the edition as Unknown Release when its year, label and catalogue cannot be established",
+            dest="music_unknown_release",
+        )
+        parser.add_argument(
+            "--music-artist-role",
+            nargs=1,
+            required=False,
+            metavar="NAME=ROLE",
+            help="MUSIC: extra artist credits as 'Name=role; Name=role' (main, guest, composer, conductor, dj, remixer, producer, arranger)",
+            dest="music_artist_roles",
+        )
+        parser.add_argument(
+            "--music-request-id", nargs=1, required=False, metavar="ID_OR_URL", help="MUSIC: Orpheus request to fill with this upload (checked first)", dest="music_request_id"
+        )
+        parser.add_argument(
+            "--music-group-id", nargs=1, required=False, metavar="ID_OR_URL", help="MUSIC: existing Orpheus torrent group to add this upload to", dest="music_group_id"
+        )
+        parser.add_argument(
+            "--music-watermark",
+            nargs=1,
+            required=False,
+            metavar="NOTE",
+            help="MUSIC: describe watermarks or voice-overs in the release (required disclosure)",
+            dest="music_watermark",
+        )
+        parser.add_argument(
+            "--music-lineage", nargs=1, required=False, metavar="PATH", help="MUSIC: text file with source lineage for the release description", dest="music_lineage"
+        )
+        parser.add_argument(
+            "--music-showcase", action="store_true", default=None, help="MUSIC: Orpheus Showcase release (your own work or on behalf of the artist)", dest="music_showcase"
+        )
+        parser.add_argument(
+            "--music-check-log",
+            action="store_true",
+            default=None,
+            help="MUSIC: score rip logs with the Orpheus logchecker before uploading",
+            dest="music_check_log",
+        )
         parser.add_argument("--music-label", nargs=1, required=False, help="MUSIC: label for this release", dest="music_label")
         parser.add_argument("--music-catalogue-number", nargs=1, required=False, help="MUSIC: catalogue number for this release", dest="music_catalogue_number")
         parser.add_argument("--music-genre", nargs=1, required=False, help="MUSIC: comma-separated genre override", dest="music_genres")
@@ -751,6 +863,12 @@ class Args:
             metavar="TRACKER=ID|URL",
             help="Tracker torrent ID, as TRACKER=ID, TRACKER=URL, or a tracker torrent URL. May be repeated. Example: --tracker-id AITHER=1234",
         )
+        parser.add_argument(
+            "--answer",
+            action="append",
+            metavar="KEY=VALUE",
+            help="Answer a question the upload would ask, as KEY=VALUE. May be repeated. Use --answer help to list the keys.",
+        )
         parser.add_argument("-req", "--search_requests", action="store_true", required=False, help="Search for matching requests on supported trackers", default=None)
         parser.add_argument("-sat", "--skip_auto_torrent", action="store_true", required=False, help="Skip automated qbittorrent client torrent searching", default=None)
         parser.add_argument(
@@ -875,6 +993,14 @@ class Args:
             dest="keep_nfo",
         )
         parser.add_argument("-reg", "--region", nargs=1, required=False, help="Region for discs")
+        parser.add_argument(
+            "--bluray-url",
+            nargs=1,
+            required=False,
+            help="Blu-ray.com edition URL for discs; skips the Blu-ray.com search",
+            type=normalize_bluray_url,
+            dest="bluray_url",
+        )
         parser.add_argument("-a", "--anon", action="store_true", required=False, help="Upload anonymously")
         parser.add_argument("-st", "--stream", action="store_true", required=False, help="Stream Optimized Upload")
         parser.add_argument("-webdv", "--webdv", action="store_true", required=False, help="Contains a Dolby Vision layer converted using dovi_tool (HYBRID)")
@@ -1101,6 +1227,12 @@ class Args:
         parsed_args: dict[str, Any] = vars(parsed_args_ns)
         # console.print(args)
 
+        if any(str(value).strip().lower() == "help" for value in parsed_args.get("answer") or []):
+            from src.manual_questions import answer_help
+
+            logger.info(answer_help(), extra={"markup": False})
+            sys.exit(0)
+
         # Validation: require either path, site_upload, or webui
         if not parsed_args.get("path") and not parsed_args.get("site_upload") and not parsed_args.get("webui"):
             logger.error("[red]Error: Either a path must be provided, --site-upload must be specified, or --webui must be specified.[/red]")
@@ -1189,6 +1321,15 @@ class Args:
                         for tracker_id_value in value_list:
                             tracker_name, torrent_id = self.parse_tracker_id(tracker_id_value)
                             meta.set_tracker_ids({tracker_name: torrent_id})
+                    elif key == "answer":
+                        from src.manual_questions import parse_answer_arg
+
+                        for answer_value in value_list:
+                            try:
+                                answer_key, answer = parse_answer_arg(answer_value)
+                            except ValueError as error:
+                                parser.error(str(error))
+                            meta.answers[answer_key] = answer
                     elif key == "manual_cast":
                         meta.manual_cast = [name.strip() for name in value2.split(",") if name.strip()]
                     elif key == "usenet_episodes_only":
@@ -1367,6 +1508,10 @@ class Args:
 
         if parsed_args.get("archive_password"):
             meta.usenet_archive_password_is_random = str(meta.archive_password).lower() == "random"
+
+        # A hardcoded-subtitle language implies the release has hardcoded subtitles.
+        if meta.hardcoded_subs_language:
+            meta.hardcoded_subs = True
 
         manual_frames_value = meta.manual_frames
         if manual_frames_value is not None:

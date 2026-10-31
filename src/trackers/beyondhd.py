@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import aiofiles
-import cli_ui
 import httpx
 from rich.markup import escape
 
+from src import payload_preview
 from src.cogs.redaction import Redaction
 from src.console import logger
 from src.description_review import get_base_description
+from src.manual_input import confirm_override
 from src.meta import Meta
 from src.rehostimages import ImageHostPolicy, RehostImagesManager
 from src.tracker_images import get_tracker_image_collection
@@ -28,17 +29,19 @@ class BEYONDHD:
     display_name = "BeyondHD"
     reject_english_original_bloat = True
     source_flag = "BHD"
+    # Conditional bans (EVO, iFT, LFi) are enforced in get_additional_checks.
     banned_groups = (
+        "126811",
         "4K4U",
         "AOC",
         "BiTOR",
         "C4K",
+        "CREATiVE24",
         "CRUCiBLE",
         "d3g",
         "EASports",
-        "FGT",
+        ["FGT", "Only allowed when no other encode is available"],
         "Flights",
-        "iFT",
         "iVy",
         "MeGusta",
         "MezRips",
@@ -55,7 +58,7 @@ class BEYONDHD:
         "Telly",
         "TGS",
         "tigole",
-        "TOMMY",
+        ["TOMMY", "No uploads after Nov 1, 2021"],
         "WKS",
         "x0r",
         "YIFY",
@@ -86,37 +89,21 @@ class BEYONDHD:
         api_key = str(self.tracker_config.get("api_key", "")).strip()
         self.requests_url = f"{self.base_url}/api/requests/{api_key}"
 
-    async def upload(self, meta: Meta) -> bool:
-        common = Common(config=self.config)
-        await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
+    async def get_data(self, meta: Meta, preview: bool = False) -> dict[str, Any]:
+        """Build the upload form; a ``preview`` leaves out the description."""
         cat_id = await self.get_cat_id(meta.category)
         source_id = await self.get_source(str(meta.source))
         type_id = await self.get_type(meta)
         draft = await self.get_live(meta)
-        await self.edit_desc(meta)
+        desc = None
+        if not preview:
+            await self.edit_desc(meta)
+            async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt", encoding="utf-8") as f:
+                desc = await f.read()
         tags = await self.get_tags(meta)
         custom, edition = await self.get_edition(meta, tags)
         bhd_name = await self.get_name(meta)
         anon = 0 if meta.anon == 0 and not self.config["TRACKERS"][self.tracker].get("anon", False) else 1
-
-        mi_dump = None
-        if meta.is_disc == "BDMV":
-            async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/BD_SUMMARY_00.txt", encoding="utf-8") as f:
-                mi_dump = await f.read()
-        else:
-            async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/MEDIAINFO.txt", encoding="utf-8") as f:
-                mi_dump = await f.read()
-
-        async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}]DESCRIPTION.txt", encoding="utf-8") as f:
-            desc = await f.read()
-        torrent_file_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}].torrent"
-        async with aiofiles.open(torrent_file_path, "rb") as f:
-            torrent_bytes = await f.read()
-
-        files = {
-            "mediainfo": mi_dump,
-            "file": ("torrent.torrent", torrent_bytes, "application/x-bittorrent"),
-        }
 
         data: dict[str, Any] = {
             "name": bhd_name,
@@ -145,8 +132,7 @@ class BEYONDHD:
             data["pack"] = 1
         if meta.season == "S00":
             data["special"] = 1
-        allowed_regions = ["AUS", "CAN", "CEE", "CHN", "ESP", "EUR", "FRA", "GBR", "GER", "HKG", "ITA", "JPN", "KOR", "NOR", "NLD", "RUS", "TWN", "USA"]
-        if meta.region in allowed_regions:
+        if meta.region in self.allowed_regions:
             data["region"] = meta.region
         if custom is True:
             data["custom_edition"] = edition
@@ -154,6 +140,56 @@ class BEYONDHD:
             data["edition"] = edition
         if len(tags) > 0:
             data["tags"] = ",".join(tags)
+        return data
+
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The upload form as it is known before screenshots, for the Web UI to show and edit."""
+        types = ["UHD 100", "UHD 66", "UHD 50", "BD 50", "BD 25", "DVD 9", "DVD 5", "UHD Remux", "BD Remux", "DVD Remux"]
+        types += ["2160p", "1080p", "1080i", "720p", "576p", "576i", "540p", "480p", "Other"]
+        sources = ["Blu-ray", "HD-DVD", "WEB", "HDTV", "DVD"]
+        specs = {
+            "name": payload_preview.text("Name"),
+            "category_id": payload_preview.choice("Category", {"MOVIE": "1", "TV": "2"}, by_label=True),
+            "type": payload_preview.choice("Type", types, role="release_type"),
+            "source": payload_preview.choice("Source", sources),
+            "imdb_id": payload_preview.number("IMDb ID"),
+            "tmdb_id": payload_preview.number("TMDB ID"),
+            "anon": payload_preview.flag("Anonymous", on=1, off=0),
+            "sd": payload_preview.flag("SD", on=1, off=0),
+            "live": payload_preview.flag("Live (off sends a draft)", on=1, off=0),
+            "internal": payload_preview.flag("Internal", on=1, off=None),
+            "pack": payload_preview.flag("Season pack", on=1, off=None),
+            "special": payload_preview.flag("Special", on=1, off=None),
+            "region": payload_preview.choice("Region", self.allowed_regions),
+            "edition": payload_preview.choice("Edition", ("Collector", "Director", "Extended", "Limited", "Special", "Theatrical", "Uncut", "Unrated")),
+            "custom_edition": payload_preview.text("Custom edition"),
+            "tags": payload_preview.readonly("Tags"),
+        }
+        data = await self.get_data(meta, preview=True)
+        return payload_preview.describe(self.tracker, data, specs, deferred={"description": payload_preview.DESCRIPTION_NOTE})
+
+    async def upload(self, meta: Meta) -> bool:
+        common = Common(config=self.config)
+        await common.create_torrent_for_upload(meta, self.tracker, self.source_flag)
+        data = payload_preview.apply_payload_edits(meta, self.tracker, await self.get_data(meta))
+        bhd_name = data["name"]
+
+        mi_dump = None
+        if meta.is_disc == "BDMV":
+            async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/BD_SUMMARY_00.txt", encoding="utf-8") as f:
+                mi_dump = await f.read()
+        else:
+            async with aiofiles.open(f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/MEDIAINFO.txt", encoding="utf-8") as f:
+                mi_dump = await f.read()
+
+        torrent_file_path = f"{meta.base_dir}{'/' + 'tmp' + '/'}{meta.uuid}/[{self.tracker}].torrent"
+        async with aiofiles.open(torrent_file_path, "rb") as f:
+            torrent_bytes = await f.read()
+
+        files = {
+            "mediainfo": mi_dump,
+            "file": ("torrent.torrent", torrent_bytes, "application/x-bittorrent"),
+        }
         headers = {
             "User-Agent": f"{meta.ua_name} {(meta.current_version if meta.current_version is not None else 'github.com/wastaken7/Upload-Assistant')} ({platform.system()} {platform.release()})"
         }
@@ -208,6 +244,8 @@ class BEYONDHD:
                 return False
         else:
             return False
+
+    allowed_regions = ("AUS", "CAN", "CEE", "CHN", "ESP", "EUR", "FRA", "GBR", "GER", "HKG", "ITA", "JPN", "KOR", "NOR", "NLD", "RUS", "TWN", "USA")
 
     async def get_cat_id(self, category_name: str) -> str:
         return {
@@ -379,15 +417,8 @@ class BEYONDHD:
                 "-irobot",
                 "-beyondhd",
             )
-        ):
-            if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                logger.info(f"{self.tracker}: [bold red]This is an internal {self.tracker} release, skipping upload[/bold red]")
-                if cli_ui.ask_yes_no("Do you want to upload anyway?", default=False):
-                    pass
-                else:
-                    return False
-            else:
-                return False
+        ) and not await self._confirm_or_skip(meta, f"This is an internal {self.tracker} release"):
+            return False
 
         if not meta.valid_mi_settings:
             logger.info(f"{self.tracker}: [bold red]No encoding settings in mediainfo, skipping {self.tracker} upload.[/bold red]")
@@ -399,18 +430,54 @@ class BEYONDHD:
             )
             return False
 
-        if meta.type not in ["WEBDL"] and meta.tag and any(x in meta.tag for x in ["EVO"]):
-            if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                logger.info(f"{self.tracker}: [bold red]Group {escape(str(meta.tag))} is only allowed for raw type content at {self.tracker}[/bold red]")
-                if cli_ui.ask_yes_no("Do you want to upload anyway?", default=False):
-                    pass
-                else:
-                    return False
-            else:
+        if meta.type == "REMUX" and meta.container != "mkv":
+            logger.info(f"{self.tracker}: [bold red]Remuxes must use the MKV container. Skipping upload.[/bold red]")
+            return False
+
+        if meta.type == "ENCODE" and not any(codec in meta.video_encode for codec in ("x264", "x265")):
+            logger.info(f"{self.tracker}: [bold red]Encodes must use x264 or x265, found '{escape(str(meta.video_encode))}'. Skipping upload.[/bold red]")
+            return False
+
+        disallowed_audio = set(str(meta.audio).upper().split()) & {"LPCM", "PCM", "VORBIS", "MP2", "MP3", "ALAC", "WMA"}
+        if meta.type in ["REMUX", "ENCODE", "WEBDL", "WEBRIP"] and disallowed_audio:
+            logger.info(
+                f"{self.tracker}: [bold red]Audio codec {escape(', '.join(sorted(disallowed_audio)))} is not allowed. "
+                "Allowed: AAC, AC-3, E-AC-3, DTS, DTS-ES, DTS-HD, TrueHD, Opus or FLAC. Skipping upload.[/bold red]"
+            )
+            return False
+
+        tag = str(meta.tag or "").lstrip("-").lower()
+        conditional_bans = (
+            ("evo", meta.type in ("ENCODE", "WEBRIP"), "EVO encodes and WEBRips are banned (WEB-DLs are okay)"),
+            ("ift", meta.type == "REMUX", "iFT remuxes are banned"),
+            ("lfi", meta.type == "WEBDL", "LFi WEB-DLs are banned"),
+        )
+        for group, applies, reason in conditional_bans:
+            if tag == group and applies and not await self._confirm_or_skip(meta, f"{reason} at {self.tracker}"):
+                return False
+
+        lossless_main_audio = any(codec in str(meta.audio) for codec in ("TrueHD", "DTS-HD MA"))
+        rule_prompts = (
+            (
+                meta.type == "REMUX" and lossless_main_audio and str(meta.channels) in ("1.0", "2.0"),
+                "Lossless mono/stereo audio in remuxes must be encoded to FLAC",
+            ),
+            (
+                meta.type == "ENCODE" and "x265" in meta.video_encode and meta.uhd != "UHD" and not meta.hdr and not meta.anime,
+                "x265 encodes are only allowed from a UHD source (anime/cartoons at moderator discretion)",
+            ),
+            (
+                meta.type in ("WEBDL", "WEBRIP") and bool(meta.hdr) and meta.resolution != "2160p",
+                "HDR/DV WEB releases below 2160p are only allowed if those formats are not available at 2160p",
+            ),
+            (meta.sd == 1, "SD is only allowed if there is no retail HD/UHD source available"),
+        )
+        for violated, message in rule_prompts:
+            if violated and not await self._confirm_or_skip(meta, message):
                 return False
 
         common = Common(config=self.config)
-        return common.check_and_confirm_adult_media_upload(meta, self.tracker)
+        return await common.check_and_confirm_adult_media_upload(meta, self.tracker)
 
     async def search_existing(self, meta: Meta) -> list[dict[str, Any]]:
         dupes: list[dict[str, Any]] = []
@@ -465,6 +532,10 @@ class BEYONDHD:
 
         return dupes
 
+    async def _confirm_or_skip(self, meta: Meta, message: str) -> bool:
+        logger.info(f"{self.tracker}: [bold red]{escape(message)}[/bold red]")
+        return await confirm_override(meta)
+
     def _is_true(self, value: Any) -> bool:
         """
         Converts a value to a boolean. Returns True for "true", "1", "yes" (case-insensitive), and False otherwise.
@@ -478,19 +549,31 @@ class BEYONDHD:
         return 0 if draft_bool or meta.draft else 1
 
     async def get_edition(self, meta: Meta, tags: list[str]) -> tuple[bool, str]:
-        custom = False
+        """Return (is_custom, edition). Hybrid and Open Matte are sent as tags, not editions."""
         edition = meta.edition
         if "Hybrid" in tags:
-            edition = edition.replace("Hybrid", "").strip()
-        editions = ["collector", "cirector", "extended", "limited", "special", "theatrical", "uncut", "unrated"]
-        for each in editions:
-            if each in meta.edition:
-                edition = each
-            elif edition == "":
-                edition = ""
-            else:
-                custom = True
-        return custom, edition
+            edition = re.sub(r"\bhybrid\b", "", edition, flags=re.IGNORECASE)
+        if "OpenMatte" in tags:
+            edition = re.sub(r"\bopen matte\b", "", edition, flags=re.IGNORECASE)
+        edition = " ".join(edition.split())
+        if not edition:
+            return False, ""
+
+        standard_editions = {
+            "collector": "Collector",
+            "director": "Director",
+            "extended": "Extended",
+            "limited": "Limited",
+            "special": "Special",
+            "theatrical": "Theatrical",
+            "uncut": "Uncut",
+            "unrated": "Unrated",
+        }
+        normalized = re.sub(r"'s\b|\b(?:cut|edition|version)\b", "", edition.lower())
+        normalized = " ".join(normalized.split())
+        if normalized in standard_editions:
+            return False, standard_editions[normalized]
+        return True, edition
 
     async def get_tags(self, meta: Meta) -> list[str]:
         tags: list[str] = []
@@ -526,9 +609,34 @@ class BEYONDHD:
         return tags
 
     async def get_name(self, meta: Meta) -> str:
+        if meta.manual_name is not None:
+            return meta.manual_name.strip()
+
         name = meta.name or ""
+        # BHD wants "English Title AKA Original Title". When TMDB has no English translation its title is the
+        # original one and the AKA holds IMDb's English title, so the order comes out reversed.
+        title = str(meta.title or "").strip()
+        aka = str(meta.aka or "").strip()
+        aka_title = aka.removeprefix("AKA").strip()
+        if (
+            aka_title
+            and meta.original_language not in (None, "", "en")
+            and title.casefold() == str(meta.original_title or "").strip().casefold()
+            and name.startswith(f"{title} ")
+            and f" {aka} " in name
+        ):
+            name = aka_title + name[len(title) :].replace(f" {aka} ", f" AKA {title} ", 1)
         if meta.source in ("PAL DVD", "NTSC DVD", "DVD", "NTSC", "PAL"):
             audio = meta.audio
             audio = " ".join(audio.split())
             name = name.replace(audio, f"{meta.video_codec} {audio}")
-        return name.replace("DD+", "DDP")
+        name = name.replace("DD+", "DDP")
+        # BHD writes plain Dolby Digital without a space (DD5.1), every other codec with one (DDP 5.1).
+        name = re.sub(r"\bDD (\d\.\d)\b", r"DD\1", name)
+        # HEVC discs and remuxes are assumed HDR, so SDR must be stated.
+        if meta.type in ("DISC", "REMUX") and meta.video_codec == "HEVC" and not meta.hdr and not re.search(r"\bSDR\b", name):
+            name = re.sub(r"\bHEVC\b", "SDR HEVC", name, count=1)
+        # Non-disc releases without a group tag must end with -NOGROUP; discs stay tagless.
+        if not meta.is_disc and not str(meta.tag or "").strip("- ") and not re.search(r"-NOGROUP$", name, flags=re.IGNORECASE):
+            name = f"{name}-NOGROUP"
+        return name

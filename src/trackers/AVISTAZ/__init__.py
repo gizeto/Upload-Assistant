@@ -15,14 +15,16 @@ import httpx
 from bs4 import BeautifulSoup
 
 import bbcode
+from src import payload_preview, webui_events
 from src.cogs.redaction import Redaction
 from src.console import logger, prompt_in_thread
 from src.cookie_auth import CookieValidator
 from src.get_desc import DescriptionBuilder
 from src.languages import languages_manager
+from src.manual_input import Question, ask, confirm_override
 from src.meta import Meta
+from src.screenshot_manifest import files as manifest_files
 from src.stats import record_event_async
-from src.temp_paths import screenshots_dir
 from src.trackers.common import Common
 from src.trackers.naming import add_incomplete_pack_marker
 
@@ -129,7 +131,13 @@ class AZTrackerBase:
             if attempt == 0 and not self.media_code:
                 logger.info(f"{self.tracker}: \nThe media [[yellow]IMDB:{imdb_id}[/yellow]] [[blue]TMDB:{tmdb_id}[/blue]] appears to be missing from the site's database.")
                 if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                    if await prompt_in_thread(cli_ui.ask_yes_no, f"{self.tracker}: Do you want to add it to the site database?\n"):
+                    with webui_events.field_prompt(
+                        f"{self.tracker} database",
+                        {"Tracker": self.tracker, "Title": title, "IMDb ID": imdb_id, "TMDb ID": tmdb_id},
+                        hint="This media appears to be missing from the site's database.",
+                    ):
+                        add_to_db = await prompt_in_thread(cli_ui.ask_yes_no, f"{self.tracker}: Do you want to add it to the site database?\n")
+                    if add_to_db:
                         added_successfully = await self.add_media_to_db(meta, title, category, imdb_id, tmdb_id)
                         if not added_successfully:
                             logger.info(f"{self.tracker}: Failed to add media. Aborting.")
@@ -203,18 +211,12 @@ class AZTrackerBase:
             warnings = self.rules(meta)
             if warnings:
                 logger.info(f"{self.tracker}: [red]Rule check returned the following warning(s):[/red]\n\n{warnings}")
-                if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                    if not await prompt_in_thread(cli_ui.ask_yes_no, "Do you want to continue anyway?", default=False):
-                        return False
-                else:
+                if not await confirm_override(meta, "Do you want to continue anyway?"):
                     return False
 
         if meta.type not in ["WEBDL"] and self.tracker == "PRIVATEHD" and meta.tag in ["FGT", "EVO"]:
-            if not meta.unattended or (meta.unattended and meta.unattended_confirm):
-                logger.info(f"{self.tracker}: [bold red]Group {meta.tag} is only allowed for web-dl[/bold red]")
-                if not await prompt_in_thread(cli_ui.ask_yes_no, "Do you want to upload anyway?", default=False):
-                    return False
-            else:
+            logger.info(f"{self.tracker}: [bold red]Group {meta.tag} is only allowed for web-dl[/bold red]")
+            if not await confirm_override(meta):
                 return False
 
         cookie_jar = await self.cookie_validator.load_session_cookies(meta, self.tracker)
@@ -416,16 +418,28 @@ class AZTrackerBase:
                             missing_audio_languages.append(track)
 
                 if missing_audio_languages:
-                    if meta.unattended and not meta.unattended_confirm:
-                        logger.info(f"{self.tracker}: [yellow]Unattended mode: Missing audio languages. Skipping {self.tracker} upload.[/yellow]")
-                        meta.skipping = f"{self.tracker}"
-                        return {}
                     logger.info(f"{self.tracker}: No audio language/s found.")
-                    logger.info(f"{self.tracker}: You must enter (comma-separated) languages for all audio tracks, eg: English, Spanish: ")
-                    user_input_raw = await prompt_in_thread(cli_ui.ask_string, "Enter languages: ")
-                    user_input = (user_input_raw or "").strip()
-                    langs = [lang.strip() for lang in user_input.split(",")]
-                    for lang in langs:
+                    langs = await ask(
+                        meta,
+                        Question(
+                            key="avistaz.audio_languages",
+                            kind="list",
+                            prompt=f"{self.tracker}: Enter the languages of all audio tracks, comma-separated (e.g. English, Spanish)",
+                            title="Audio languages",
+                            hint="Comma-separated languages for all audio tracks.",
+                            placeholder="e.g. English, Spanish",
+                            summary={
+                                f"Audio track {position}": track.get("Language") or "No language tag"
+                                for position, track in enumerate((t for t in tracks if t.get("@type") == "Audio"), 1)
+                                if any(track is missing for missing in missing_audio_languages)
+                            },
+                            tracker=self.tracker,
+                            validate=self._validate_languages,
+                        ),
+                    )
+                    if langs is None and meta.skipping == self.tracker:
+                        return {}
+                    for lang in langs or []:
                         target_id = self.lang_map.get(lang.lower())
                         if target_id:
                             audio_ids.add(target_id)
@@ -439,6 +453,10 @@ class AZTrackerBase:
         final_audio_ids = sorted(audio_ids)
 
         return {"subtitles[]": final_subtitle_ids, "languages[]": final_audio_ids}
+
+    def _validate_languages(self, languages: list[str]) -> str | None:
+        unknown = [language for language in languages if not self.lang_map.get(language.lower())]
+        return f"Unknown language(s): {', '.join(unknown)}" if unknown else None
 
     async def img_host(self, _meta: Meta, referer: str, image_bytes: bytes, filename: str) -> str | None:
         upload_url = f"{self.base_url}/ajax/image/upload"
@@ -485,8 +503,7 @@ class AZTrackerBase:
             )
 
     async def get_screenshots(self, meta: Meta) -> list[str] | None:
-        screens_dir = screenshots_dir(meta.base_dir, meta.uuid)
-        local_files = sorted(path for path in screens_dir.glob("*.png") if path.is_file())
+        local_files = [path for path in manifest_files(meta.base_dir, meta.uuid, "main") if path.suffix.casefold() == ".png"]
         results: list[str] = []
 
         limit = 3 if (meta.category == "TV" and meta.tv_pack == 0) else 15
@@ -800,6 +817,9 @@ class AZTrackerBase:
         # https://avistaz.to/guides/how-to-properly-titlename-a-torrent
         # https://cinemaz.to/guides/how-to-properly-titlename-a-torrent
         # https://privatehd.to/rules/upload-rules
+        if meta.manual_name is not None:
+            return meta.manual_name.strip()
+
         aka_name = meta.aka or ""
         manual_episode_title = meta.manual_episode_title or ""
         daily_episode_title = meta.daily_episode_title or ""
@@ -943,7 +963,7 @@ class AZTrackerBase:
         }
 
         source_type = (meta.type or "").strip().lower()
-        source = meta.source or "".strip().lower()
+        source = (meta.source or "").strip().lower()
         is_disc = (meta.is_disc or "").strip().lower()
 
         html_label = ""
@@ -955,7 +975,7 @@ class AZTrackerBase:
                 html_label = "DVD"
 
         elif source_type == "remux":
-            if "dvd" in source:
+            if source in ("dvd", "pal dvd", "ntsc dvd"):
                 html_label = "DVD Remux"
             elif source in ("bluray", "blu-ray"):
                 html_label = "BluRay REMUX"
@@ -969,22 +989,24 @@ class AZTrackerBase:
 
         return available_rip_types.get(html_label, "0")
 
-    async def fetch_data(self, meta: Meta) -> dict[str, Any]:
-        cookie_jar = await self.cookie_validator.load_session_cookies(meta, self.tracker)
-        if cookie_jar:
-            self.session.cookies = cookie_jar
+    async def fetch_data(self, meta: Meta, preview: bool = False) -> dict[str, Any]:
+        """Build the upload form; a ``preview`` sends no request to the site and leaves out the description and reports."""
+        if not preview:
+            cookie_jar = await self.cookie_validator.load_session_cookies(meta, self.tracker)
+            if cookie_jar:
+                self.session.cookies = cookie_jar
         lang_info = await self.get_lang(meta) or {}
         if getattr(meta, "skipping", None) == self.tracker:
             return {}
-        task_info = await self.create_task_id(meta)
+        task_info = {} if preview else await self.create_task_id(meta)
 
         data: dict[str, Any] = {
-            "_token": self.az_class.secret_token,
+            "_token": "" if preview else self.az_class.secret_token,
             "torrent_id": "",
             "type_id": self.get_cat_id(meta.category),
             "file_name": await self.get_name(meta),
             "anon_upload": "",
-            "description": await self.edit_desc(meta),
+            "description": None if preview else await self.edit_desc(meta),
             "qqfile": "",
             "rip_type_id": self.get_rip_type(meta),
             "video_quality_id": self.get_video_quality(meta),
@@ -992,8 +1014,9 @@ class AZTrackerBase:
             "movie_id": self.media_code,
             "languages[]": lang_info.get("languages[]"),
             "subtitles[]": lang_info.get("subtitles[]"),
-            "media_info": await self.get_file_info(meta),
-            "tags[]": await self.get_tags(meta),
+            "media_info": None if preview else await self.get_file_info(meta),
+            # Tag IDs are looked up on the site.
+            "tags[]": None if preview else await self.get_tags(meta),
             "screenshots[]": [""],
         }
 
@@ -1011,6 +1034,8 @@ class AZTrackerBase:
         if anon:
             data.update({"anon_upload": "1"})
 
+        if preview:
+            return data
         if not meta.debug:
             try:
                 self.upload_url_step2 = task_info.get("redirect_url", "")
@@ -1042,10 +1067,58 @@ class AZTrackerBase:
 
         return False
 
+    async def get_payload_preview(self, meta: Meta) -> payload_preview.TrackerPreview:
+        """The upload form as it is known before screenshots, for the Web UI to show and edit."""
+        specs = {
+            "torrent_id": payload_preview.readonly("Torrent ID"),
+            "type_id": payload_preview.choice("Category", {"MOVIE": "1", "TV": "2"}, by_label=True, role="category"),
+            "file_name": payload_preview.text("Name"),
+            "anon_upload": payload_preview.flag("Anonymous", on="1", off=""),
+            "qqfile": payload_preview.readonly("File"),
+            "rip_type_id": payload_preview.choice(
+                "Rip type",
+                [
+                    ("1", "BDRip"),
+                    ("2", "BluRay"),
+                    ("3", "BRRip"),
+                    ("4", "DVD"),
+                    ("5", "DVDRip"),
+                    ("6", "HDRip"),
+                    ("7", "HDTV"),
+                    ("8", "VCD"),
+                    ("9", "VCDRip"),
+                    ("10", "VHSRip"),
+                    ("11", "VODRip"),
+                    ("12", "WEB-DL"),
+                    ("13", "WEBRip"),
+                    ("14", "BluRay REMUX"),
+                    ("15", "BluRay Raw"),
+                    ("16", "SDTV"),
+                    ("17", "DVD Remux"),
+                ],
+            ),
+            "video_quality_id": payload_preview.choice("Video quality", [("1", "SD"), ("2", "720p"), ("3", "1080p"), ("7", "1080i"), ("6", "2160p"), ("8", "4320p")]),
+            "video_resolution": payload_preview.text("Video resolution"),
+            "languages[]": payload_preview.readonly("Audio languages"),
+            "subtitles[]": payload_preview.readonly("Subtitles"),
+            "tv_collection": payload_preview.choice("TV collection", [("1", "Episode"), ("2", "Season pack")]),
+            "tv_season": payload_preview.number("Season"),
+            "tv_episode": payload_preview.number("Episode"),
+        }
+        deferred = {
+            "movie_id": "Found on the tracker at upload time",
+            "tags[]": "Looked up on the tracker at upload time",
+            "description": payload_preview.DESCRIPTION_NOTE,
+            "media_info": "Read from the MediaInfo/BDInfo report at upload time",
+            "screenshots[]": "Uploaded to the tracker after this question",
+        }
+        return payload_preview.describe(self.tracker, await self.fetch_data(meta, preview=True), specs, deferred=deferred, name_key="file_name")
+
     async def upload(self, meta: Meta) -> bool:
         data = await self.fetch_data(meta)
         if getattr(meta, "skipping", None) == self.tracker:
             return False
+        data = payload_preview.apply_payload_edits(meta, self.tracker, data)
         status_message = ""
 
         issue = self.check_data(meta, data)
